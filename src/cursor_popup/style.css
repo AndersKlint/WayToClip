@@ -1,0 +1,132 @@
+.waytoclip-popup-window {
+    background-color: transparent;
+}
+
+.waytoclip-popup {
+    background-color: @theme_bg_color;
+    color: @theme_fg_color;
+    border: 1px solid alpha(@theme_fg_color, 0.15);
+    border-radius: 12px;
+    padding: 8px;
+}
+
+
+.waytoclip-popup-list-scroll {
+    border: none;
+    background: none;
+}
+
+.waytoclip-popup-list-scroll undershoot.top,
+.waytoclip-popup-list-scroll undershoot.bottom {
+    background: none;
+}
+
+.waytoclip-popup-item {
+    padding: 8px 12px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+}
+
+.waytoclip-popup-item:hover {
+    background-color: alpha(@theme_fg_color, 0.08);
+}
+
+.waytoclip-popup-item.selected,
+.waytoclip-popup-item.selected:hover {
+    background-color: alpha(@theme_selected_bg_color, 0.4);
+    background-color: alpha(@accent_bg_color, 0.4);
+    border-color: alpha(@theme_selected_bg_color, 0.4);
+    border-color: alpha(@accent_color, 0.4);
+}
+
+.waytoclip-item-number {
+    font-weight: bold;
+    min-width: 24px;
+    font-size: 0.95em;
+}
+
+.waytoclip-item-text {
+    font-size: 1em;
+}
+
+.waytoclip-item-image {
+    border-radius: 6px;
+    color: alpha(@theme_fg_color, 0.65);
+}
+
+.waytoclip-empty-label {
+    font-style: italic;
+    padding: 16px 12px;
+}
+
+.waytoclip-page-indicator {
+    font-size: 0.85em;
+    padding: 8px 0 4px 0;
+    border-top: 1px solid alpha(@theme_fg_color, 0.15);
+}
+
+.waytoclip-search-bar {
+    margin: 8px;
+    padding: 6px 6px 6px 10px;
+    border: 1px solid alpha(@theme_fg_color, 0.2);
+    border-radius: 6px;
+    background-color: alpha(@theme_fg_color, 0.06);
+}
+
+.waytoclip-search-bar.focus {
+    border-color: alpha(@accent_color, 0.65);
+}
+
+.waytoclip-search-entry {
+    padding: 0;
+    background: none;
+    border: none;
+    box-shadow: none;
+}
+
+.waytoclip-search-toggle {
+    padding: 4px 6px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: none;
+    font-weight: normal;
+}
+
+.waytoclip-search-toggle:hover {
+    background-color: alpha(@theme_fg_color, 0.1);
+}
+
+.waytoclip-search-toggle.active,
+.waytoclip-search-toggle:checked {
+    color: @theme_selected_bg_color;
+    color: @accent_color;
+    font-weight: bold;
+}
+
+.waytoclip-hint {
+    font-size: 0.8em;
+    padding: 8px 12px 4px 12px;
+}
+
+.waytoclip-hint.active {
+    color: @theme_selected_bg_color;
+    color: @accent_color;
+}
+
+.waytoclip-hint image {
+    -gtk-icon-size: 1.1em;
+}
+
+.waytoclip-favorites-row {
+    margin-top: 4px;
+}
+
+.waytoclip-favorites-icon {
+    margin-right: 8px;
+}
+
+.waytoclip-status {
+    font-size: 0.85em;
+    padding: 4px 12px 8px 12px;
+    color: alpha(@theme_fg_color, 0.8);
+}

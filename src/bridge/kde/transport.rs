@@ -11,6 +11,7 @@ use gtk::{gio, glib};
 use serde_json::{Value, json};
 
 use super::{PopupTarget, error};
+use crate::clipboard::kde::{FocusedApp, FocusedAppHandle};
 
 const INTERFACE: &str = "org.waytoclip.WayToClip.Kde";
 const XML: &str = r#"<node><interface name="org.waytoclip.WayToClip.Kde"><method name="NextCommand"><arg type="s" direction="in"/><arg type="s" direction="out"/></method><method name="ReportResult"><arg type="s" direction="in"/><arg type="s" direction="in"/></method><method name="ReportEvent"><arg type="s" direction="in"/><arg type="s" direction="in"/></method></interface></node>"#;
@@ -28,6 +29,8 @@ struct State {
     next_token: u32,
     next_request: u32,
     active: Option<u32>,
+    active_has_target: bool,
+    focused: FocusedAppHandle,
     pending: HashMap<u32, Pending>,
     queue: VecDeque<(u32, String)>,
     poll: Option<(u64, oneshot::Sender<String>)>,
@@ -37,6 +40,7 @@ struct State {
 impl State {
     fn invalidate(&mut self, reason: &str) {
         self.active = None;
+        self.active_has_target = false;
         self.queue.clear();
         for (_, pending) in self.pending.drain() {
             let _ = pending.reply.send(Err(error(reason)));
@@ -48,12 +52,42 @@ impl State {
             self.invalidate("KWin owner changed or vanished");
             self.instance = None;
             self.retired_instances.clear();
+            if let Ok(mut focused) = self.focused.lock() {
+                *focused = FocusedApp::default();
+            }
             if let Some((_, poll)) = self.poll.take() {
                 let _ = poll.send(json!({"operation": "idle"}).to_string());
             }
             self.owner = owner;
         }
     }
+}
+
+pub(super) fn required_i32(value: &Value, name: &str) -> Result<i32, glib::Error> {
+    value
+        .as_i64()
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(|| error(&format!("KWin begin result requires {name}")))
+}
+
+fn parse_target(token: u32, reply: &Value) -> Result<PopupTarget, glib::Error> {
+    let has_target = reply["has_target"]
+        .as_bool()
+        .ok_or_else(|| error("KWin begin result requires has_target"))?;
+    let available_width = required_i32(&reply["available_width"], "available_width")?;
+    let available_height = required_i32(&reply["available_height"], "available_height")?;
+    if available_width < 0 || available_height < 0 {
+        return Err(error("KWin begin result has an invalid work area"));
+    }
+    Ok(PopupTarget {
+        token,
+        app_id: reply["app_id"].as_str().unwrap_or_default().to_owned(),
+        wm_class: reply["wm_class"].as_str().unwrap_or_default().to_owned(),
+        is_terminal: false,
+        has_target,
+        available_width,
+        available_height,
+    })
 }
 
 pub struct Transport {
@@ -79,8 +113,14 @@ impl Drop for RequestGuard {
 }
 
 impl Transport {
-    pub fn new(connection: gio::DBusConnection) -> Result<Self, glib::Error> {
-        let state = Rc::new(RefCell::new(State::default()));
+    pub fn new(
+        connection: gio::DBusConnection,
+        focused: FocusedAppHandle,
+    ) -> Result<Self, glib::Error> {
+        let state = Rc::new(RefCell::new(State {
+            focused,
+            ..State::default()
+        }));
         let weak = Rc::downgrade(&state);
         let vanished = weak.clone();
         let watcher = gio::bus_watch_name_on_connection(
@@ -164,6 +204,14 @@ impl Transport {
         }
     }
 
+    pub fn has_target(&self, token: u32) -> Result<bool, glib::Error> {
+        let state = self.state.borrow();
+        if state.active != Some(token) {
+            return Err(error("KDE popup session is no longer active"));
+        }
+        Ok(state.active_has_target)
+    }
+
     pub fn clear(&self, token: u32, reason: &str) {
         let mut state = self.state.borrow_mut();
         if state.active == Some(token) {
@@ -171,7 +219,7 @@ impl Transport {
         }
     }
 
-    pub async fn begin(&self) -> Result<PopupTarget, glib::Error> {
+    pub async fn begin(&self, popup_position_mode: i32) -> Result<PopupTarget, glib::Error> {
         let deadline = Instant::now() + Duration::from_secs(3);
         while self.state.borrow().instance.is_none() {
             if Instant::now() >= deadline {
@@ -193,25 +241,31 @@ impl Transport {
             token
         };
         let result = self
-            .command("begin", token, json!({"pid": std::process::id()}))
+            .command(
+                "begin",
+                token,
+                json!({
+                    "pid": std::process::id(),
+                    "popup_position_mode": popup_position_mode,
+                }),
+            )
             .await;
         match result {
             Ok(reply) => {
-                let target = match (reply["app_id"].as_str(), reply["is_terminal"].as_bool()) {
-                    (Some(app_id), Some(is_terminal)) => Ok(PopupTarget {
-                        token,
-                        app_id: app_id.to_owned(),
-                        is_terminal,
-                    }),
-                    _ => Err(error("KWin begin result requires app_id and is_terminal")),
-                };
-                if target.is_err() {
-                    let _ = self
-                        .command("cancel", token, json!({"should_restore_focus": false}))
-                        .await;
-                    self.clear(token, "Invalid begin result");
+                let target = parse_target(token, &reply);
+                match target {
+                    Ok(target) => {
+                        self.state.borrow_mut().active_has_target = target.has_target;
+                        Ok(target)
+                    }
+                    Err(cause) => {
+                        let _ = self
+                            .command("cancel", token, json!({"should_restore_focus": false}))
+                            .await;
+                        self.clear(token, "Invalid begin result");
+                        Err(cause)
+                    }
                 }
-                target
             }
             Err(error) => {
                 if self.validate(token).is_ok() {
@@ -312,7 +366,7 @@ async fn dispatch(
     {
         let mut state = state.borrow_mut();
         if state.instance.as_deref() != Some(&instance) {
-            if method != "NextCommand" {
+            if method != "NextCommand" && method != "ReportEvent" {
                 return Err(error("Script instance is no longer registered"));
             }
             if state.retired_instances.contains(&instance) {
@@ -327,6 +381,9 @@ async fn dispatch(
                 state.retired_instances.insert(previous);
             }
             state.invalidate("KWin script instance replaced");
+            if let Ok(mut focused) = state.focused.lock() {
+                *focused = FocusedApp::default();
+            }
             if let Some((_, poll)) = state.poll.take() {
                 let _ = poll.send(json!({"operation":"idle"}).to_string());
             }
@@ -369,6 +426,22 @@ async fn dispatch(
     }
     let value: Value =
         serde_json::from_str(&payload).map_err(|e| error(&format!("Invalid KWin JSON: {e}")))?;
+    if method == "ReportEvent" && value["event"].as_str() == Some("active_app") {
+        let app_id = value["app_id"].as_str().unwrap_or_default();
+        let wm_class = value["wm_class"].as_str().unwrap_or_default();
+        if app_id.len() > 256 || wm_class.len() > 256 {
+            return Err(error("Invalid active application snapshot"));
+        }
+        let focused = FocusedApp {
+            app_id: app_id.to_owned(),
+            wm_class: wm_class.to_owned(),
+        };
+        let handle = state.borrow().focused.clone();
+        if let Ok(mut snapshot) = handle.lock() {
+            *snapshot = focused;
+        }
+        return Ok(().to_variant());
+    }
     let token = value["token"]
         .as_u64()
         .and_then(|v| u32::try_from(v).ok())

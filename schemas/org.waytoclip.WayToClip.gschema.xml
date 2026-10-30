@@ -1,0 +1,314 @@
+<schemalist gettext-domain="waytoclip">
+    <schema id="org.waytoclip.WayToClip"
+        path="/org/waytoclip/WayToClip/">
+
+    <key type="i" name="history-size">
+        <default>100</default>
+        <summary>The number of items to save in history</summary>
+        <description></description>
+        <range min="1" max="10000"/>
+    </key>
+
+    <key name="clear-on-boot" type="b">
+        <default>false</default>
+        <summary>Clear clipboard history on every system reboot.</summary>
+    </key>
+
+    <key name="auto-paste" type="b">
+        <default>true</default>
+        <summary>Automatically paste after selecting an item</summary>
+        <description>
+            If true, selecting an item from the popup will automatically paste it at the cursor position
+        </description>
+    </key>
+
+    <key name="popup-position-mode" type="i">
+        <default>0</default>
+        <summary>Popup position mode</summary>
+        <description>
+            0 = at mouse cursor, 1 = center of focused window
+        </description>
+        <range min="0" max="1"/>
+    </key>
+
+    <key name="limit-popup-pages" type="b">
+        <default>false</default>
+        <summary>Limit number of pages in popup</summary>
+        <description>
+            If false, the popup shows the full clipboard history.
+            If true, the popup is capped to popup-pages pages.
+        </description>
+    </key>
+
+    <key name="popup-pages" type="i">
+        <default>3</default>
+        <summary>Maximum number of pages in popup</summary>
+        <description>
+            Each page shows 10 items. Only applies when limit-popup-pages is true.
+        </description>
+        <range min="1" max="100"/>
+    </key>
+
+    <key type="i" name="cache-size">
+        <default>64</default>
+        <summary>The allowed size for the cache file in MB</summary>
+        <description>
+            If the cache overflows this limit, the file will be overriden.
+            High limit might cause slowness of shell startup.
+        </description>
+        <range min="1" max="1024"/>
+    </key>
+
+    <key name="cache-only-favorites" type="b">
+        <default>false</default>
+        <summary>Only save favorites to disk</summary>
+        <description>
+            Contents which are not favorites are not stored and retrieved from a cache file.
+            This can avoid writing passwords to a plaintext file, but at the cost of persistant history.
+            Your clipboard history, except favorite items, is lost after a gnome-shell session ends or the extension is reloaded.
+        </description>
+    </key>
+
+    <key name="confirm-clear" type="b">
+        <default>true</default>
+        <summary>Show confirmation dialog on Clear History</summary>
+        <description>
+            If true, a confirmation dialog is shown when attempting to Clear History.
+        </description>
+    </key>
+
+    <key name="move-item-first" type="b">
+        <default>true</default>
+        <summary>Move items to the top of the list when selected.</summary>
+        <description>
+            If true, move items to the top of the list when it is selected.
+        </description>
+    </key>
+    <key name="keep-selected-on-clear" type="b">
+        <default>false</default>
+        <summary>Keep selected item on clear</summary>
+        <description>
+            Whether to keep the currently selected entry in the clipboard
+            after clearing the history.
+        </description>
+    </key>
+    <key name="enable-keybindings" type="b">
+        <default>true</default>
+        <summary>Enable the keyboard shortcuts</summary>
+        <description>
+            If true, user can toggle the popup, clear history and toggle private mode with keyboard shortcuts.
+        </description>
+    </key>
+    <key name="clear-history" type="as">
+        <default>[]</default>
+            <summary>Key to clear the history</summary>
+            <description>
+            </description>
+        </key>
+        <key name="toggle-popup" type="as">
+        <default>[]</default>
+            <summary>Toggle the cursor popup</summary>
+            <description>
+                Key to toggle the cursor-positioned clipboard popup.
+                Empty by default; set a shortcut in the extension Settings.
+            </description>
+        </key>
+        <key name="private-mode-binding" type="as">
+        <default>[]</default>
+            <summary>Toggle "Private Mode"</summary>
+            <description>
+                Key to toggle the private mode
+            </description>
+        </key>
+        <key name="should-cache-images" type="b">
+        <default>true</default>
+        <summary>Cache images to disk</summary>
+        <description>
+            Allow caching images to disk so they survive a reboot. Otherwise they will only be temporarily saved in memory.
+        </description>
+    </key>
+    <key name="excluded-apps" type="as">
+        <default>[]</default>
+        <summary>List of excluded applications</summary>
+        <description>
+            A list of applications that are excluded from clipboard history.
+        </description>
+    </key>
+    <key name="terminal-apps" type="as">
+        <default><![CDATA[['org.gnome.ptyxis', 'ptyxis', 'org.gnome.terminal', 'gnome-terminal', 'gnome-terminal-server', 'org.gnome.console', 'gnome-console', 'kgx', 'org.kde.konsole', 'konsole', 'alacritty', 'kitty', 'kitty-diff', 'org.wezfurlong.wezterm', 'wezterm', 'wezterm-gui', 'com.mitchellh.ghostty', 'ghostty', 'foot', 'footclient', 'foot-server', 'com.gexperts.tilix', 'tilix', 'terminator', 'xterm', 'uxterm', 'x-terminal-emulator', 'urxvt', 'rxvt', 'rxvt-unicode', 'xfce4-terminal', 'lxterminal', 'mate-terminal', 'com.raggesilver.blackbox', 'blackbox', 'dev.warp.warp', 'warp', 'tabby', 'org.tabby', 'qterminal', 'org.lxqt.qterminal', 'sakura', 'st', 'st-256color', 'com.deepin.terminal', 'deepin-terminal', 'io.elementary.terminal', 'pantheon-terminal', 'com.system76.cosmicterm', 'cosmic-term', 'contour', 'rio', 'hyper']]]></default>
+        <summary>Terminal applications for special paste</summary>
+        <description>
+            Window classes or app ids treated as terminals for auto-paste.
+            Terminals need Ctrl+Shift+V because plain Ctrl+V isn't bound to
+            clipboard paste there. Add your
+            terminal here if auto-paste inserts the wrong text in it.
+        </description>
+    </key>
+    <key name="clear-history-on-interval" type="b">
+        <default>false</default>
+        <summary>Enable clearing history on interval</summary>
+        <description>
+            If true, clipboard history will be cleared at regular intervals.
+        </description>
+    </key>
+    <key name="clear-history-interval" type="i">
+        <default>60</default>
+        <summary>Interval for clearing history in minutes</summary>
+        <description>
+            The interval in minutes at which the clipboard history will be cleared.
+        </description>
+        <range min="1"/>
+    </key>
+    <key name="next-history-clear" type="i">
+        <default>-1</default>
+        <summary>Next scheduled history clear time</summary>
+        <description>
+            The timestamp for the next scheduled history clear.
+        </description>
+    </key>
+    <key name="case-sensitive-search" type="b">
+        <default>false</default>
+        <summary>Toggle case sensitive search in popup</summary>
+    </key>
+    <key name="regex-search" type="b">
+        <default>false</default>
+        <summary>Toggle Regex-based search in popup</summary>
+    </key>
+    <key name="show-shortcut-hints" type="b">
+        <default>true</default>
+        <summary>Show shortcut reminder icons in the cursor popup</summary>
+        <description>
+            If true, the footer of the cursor popup shows reminder icons
+            for the popup-local shortcuts.
+        </description>
+    </key>
+    <key name="ignore-secret-mimetypes" type="b">
+        <default>true</default>
+        <summary>Ignore clipboard marked as secret</summary>
+        <description>
+            Skip clipboard content offering a secret mimetype
+            (x-kde-passwordManagerHint, x-gnome-passwordManagerHint
+            with value secret, or application/x-nspasteboard-concealed-type).
+            Password managers use these to keep secrets out of history.
+        </description>
+    </key>
+    <key name="local-search" type="as">
+        <default><![CDATA[['s']]]></default>
+        <summary>Popup shortcut: toggle search</summary>
+    </key>
+    <key name="local-delete-entry" type="as">
+        <default><![CDATA[['d']]]></default>
+        <summary>Popup shortcut: delete selected entry</summary>
+    </key>
+    <key name="local-private-mode" type="as">
+        <default><![CDATA[['p']]]></default>
+        <summary>Popup shortcut: toggle private mode</summary>
+    </key>
+    <key name="local-page-next" type="as">
+        <default><![CDATA[['Tab', 'Right']]]></default>
+        <summary>Popup shortcut: next page</summary>
+    </key>
+    <key name="local-page-previous" type="as">
+        <default><![CDATA[['<Shift>ISO_Left_Tab', 'Left']]]></default>
+        <summary>Popup shortcut: previous page</summary>
+    </key>
+    <key name="local-move-up" type="as">
+        <default><![CDATA[['Up']]]></default>
+        <summary>Popup shortcut: move selection up</summary>
+    </key>
+    <key name="local-move-down" type="as">
+        <default><![CDATA[['Down']]]></default>
+        <summary>Popup shortcut: move selection down</summary>
+    </key>
+    <key name="local-confirm" type="as">
+        <default><![CDATA[['Return', 'KP_Enter']]]></default>
+        <summary>Popup shortcut: confirm selection</summary>
+    </key>
+    <key name="local-close" type="as">
+        <default><![CDATA[['Escape']]]></default>
+        <summary>Popup shortcut: close popup</summary>
+    </key>
+    <key name="local-case-sensitive" type="as">
+        <default><![CDATA[['<Alt>c']]]></default>
+        <summary>Popup shortcut: toggle match case while searching</summary>
+    </key>
+    <key name="local-regex-search" type="as">
+        <default><![CDATA[['<Alt>r']]]></default>
+        <summary>Popup shortcut: toggle regular expressions while searching</summary>
+    </key>
+    <key name="local-toggle-favorite" type="as">
+        <default><![CDATA[['f']]]></default>
+        <summary>Popup shortcut: toggle favorite on selected entry</summary>
+    </key>
+    <key name="local-favorites-view" type="as">
+        <default><![CDATA[['-']]]></default>
+        <summary>Popup shortcut: open favorites or go back</summary>
+    </key>
+    <key name="local-quick-select-1" type="as">
+        <default><![CDATA[['1']]]></default>
+        <summary>Popup shortcut: quick select item 1</summary>
+    </key>
+    <key name="local-quick-select-2" type="as">
+        <default><![CDATA[['2']]]></default>
+        <summary>Popup shortcut: quick select item 2</summary>
+    </key>
+    <key name="local-quick-select-3" type="as">
+        <default><![CDATA[['3']]]></default>
+        <summary>Popup shortcut: quick select item 3</summary>
+    </key>
+    <key name="local-quick-select-4" type="as">
+        <default><![CDATA[['4']]]></default>
+        <summary>Popup shortcut: quick select item 4</summary>
+    </key>
+    <key name="local-quick-select-5" type="as">
+        <default><![CDATA[['5']]]></default>
+        <summary>Popup shortcut: quick select item 5</summary>
+    </key>
+    <key name="local-quick-select-6" type="as">
+        <default><![CDATA[['6']]]></default>
+        <summary>Popup shortcut: quick select item 6</summary>
+    </key>
+    <key name="local-quick-select-7" type="as">
+        <default><![CDATA[['7']]]></default>
+        <summary>Popup shortcut: quick select item 7</summary>
+    </key>
+    <key name="local-quick-select-8" type="as">
+        <default><![CDATA[['8']]]></default>
+        <summary>Popup shortcut: quick select item 8</summary>
+    </key>
+    <key name="local-quick-select-9" type="as">
+        <default><![CDATA[['9']]]></default>
+        <summary>Popup shortcut: quick select item 9</summary>
+    </key>
+    <key name="local-quick-select-10" type="as">
+        <default><![CDATA[['0']]]></default>
+        <summary>Popup shortcut: quick select item 10</summary>
+    </key>
+    <key name="enable-favorites" type="b">
+        <default>true</default>
+        <summary>Enable favorites in the cursor popup</summary>
+        <description>
+            If true, entries can be marked as favorites and browsed
+            in a dedicated favorites view inside the cursor popup.
+        </description>
+    </key>
+    <key name="image-preview-size" type="i">
+        <default>96</default>
+        <summary>Image thumbnail size in the popup</summary>
+        <description>
+            Maximum height in pixels of image previews shown in the cursor popup.
+        </description>
+        <range min="32" max="512"/>
+    </key>
+    <key name="language" type="s">
+        <default>'system'</default>
+        <summary>Interface language</summary>
+        <description>
+            Interface language override. 'system' follows the GNOME system
+            language. Any other value is a locale code from the shipped
+            locale directory (e.g. 'de', 'fr_FR'). Takes effect after a
+            restart of GNOME Shell / reopening Settings.
+        </description>
+    </key>
+    </schema>
+</schemalist>

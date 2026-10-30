@@ -1,48 +1,113 @@
 # WayToClip
 
-A Rust port of the keyboard-driven WayToClip clipboard manager for Wayland. The goal is to preserve the original application's behavior with a full GTK4 popup and a thin desktop-specific bridge.
+A Rust port of the keyboard-driven WayToClip clipboard manager for Wayland. The Rust application owns the full GTK4 popup; GNOME Shell or a KWin script supplies only the privileged desktop operations.
 
-The interaction proofs target **GNOME Shell 50** (local environment: 50.6) and **Plasma/KWin 6.4+ on Wayland**. Both proofs are complete with user-accepted basic cursor placement and paste interaction. Broader version support is undecided.
+## Status
 
-## Current milestone
+Milestones 1–5 are implemented. The application is now a resident, event-driven text and image clipboard manager with:
 
-The current milestone is the **behavioral port** described in [PORTING.md](PORTING.md#3-behavioral-port--current). The completed interaction proofs implement one editable text payload with **Paste**, **Copy only**, **Read clipboard**, **Quit**, and a terminal-paste toggle. The payload stays in memory only. Escape or focus loss dismisses the popup. Launching toggles the resident app: hidden opens; visible or reading the clipboard cancels and dismisses. History capture, persistence, images, and private mode belong to later work.
+- pure history, clipboard, paste-target, search, shortcut, and secret-hint logic in Rust;
+- an app-owned GSettings schema, async JSON history persistence, a clear-history scheduler, and bundled translations;
+- text capture with exclusions, secret filtering, own-write suppression, and private mode;
+- live image capture, asynchronous image previews, original image payload publication, and image persistence;
+- a GTK4 popup with 10 numbered slots per page, paging, search, favorites, deletion, shortcut hints, theme-aware styling, and workarea fitting;
+- GNOME Shell and KDE Wayland bridges, resident lifecycle, and CLI actions;
+- an app-owned GTK4 Settings window and native global shortcut registration on both desktops.
 
-This is not yet the complete clipboard manager. Build verification does not establish desktop compatibility; the detailed manual gate remains available for further acceptance and regression checks.
+The user reported the basic milestones 1–5 nested GNOME popup/history/image flow working (“good it works”). This is limited current-app feedback, not comprehensive desktop acceptance or KDE acceptance. Settings and global shortcuts are implemented but have no new desktop acceptance yet. Milestone 6 is user-run desktop acceptance, with Settings/global shortcuts next. Panel, autostart, and distribution/packaging remain deferred. The earlier POC acceptance is historical only; see [Historical POC acceptance](#historical-poc-acceptance).
 
-The user confirms nested GNOME “fully works. pops up at cursor and pastes fine and all”. This confirms basic placement and paste interaction, without establishing exhaustive first-frame, multi-monitor, edge, or mixed-scale acceptance.
+## Build and run
 
-After the fake-input blocker was fixed, the user also confirmed KDE popup placement at the cursor and paste into the original target worked, accepting the KDE proof. Detailed monitor/scale and other edge-case coverage remains outstanding.
-
-## Quick development: nested GNOME session
-
-Requires a Rust toolchain supporting edition 2024, **GTK4 >= 4.20**, **GLib/GIO >= 2.80**, **libxkbcommon development packages**, and `pkg-config`. Cargo uses `gtk4` 0.11 with `v4_20`, `gio` 0.22 with `v2_80`, and `xkbcommon` 0.9 (the crate version, not a system-library minimum). Typical libxkbcommon package names are `libxkbcommon-dev` or `libxkbcommon-devel`. These GTK/GLib requirements limit which distro releases can build the app, independently of their Plasma version. Run from this checkout:
+Requires a Rust toolchain supporting edition 2024, **GTK4 >= 4.20**, **GLib/GIO >= 2.80**, **libxkbcommon development packages**, `pkg-config`, and **`glib-compile-schemas`**. Typical libxkbcommon package names are `libxkbcommon-dev` or `libxkbcommon-devel`.
 
 ```sh
-make nested-session
+cargo build
+./target/debug/waytoclip
 ```
 
-This is the preferred development workflow on GNOME Shell 50. It requires `make`, Bash, `dbus-run-session`, `gsettings`, `gdbus`, `tail`, and GNOME Shell with `--devkit` and `--wayland`. It builds the debug executable, stages the latest bridge in temporary session-local data, enables it in isolated settings, and opens a nested Shell on a private D-Bus session. No installation into your normal session or logout is needed.
+`build.rs` compiles `schemas/` into `$OUT_DIR/schemas`. At runtime the application uses a system-installed `org.waytoclip.WayToClip` schema first and falls back to that build-tree directory. A binary copied outside this checkout still needs the schema installed in the system schema path (for example `/usr/share/glib-2.0/schemas`, followed by `glib-compile-schemas`) or `GSETTINGS_SCHEMA_DIR` set to a directory containing it.
 
-1. Open an editor or terminal **inside the nested Shell**, and focus an editable target there.
-2. Wait for **Bridge ready** in the original terminal. Run the exact temporary wrapper command printed by the helper, for example `"/tmp/waytoclip-session.XXXXXXXX/waytoclip"`, from either a terminal or **Alt+F2** inside the nested Shell. Keep the quotes if the path contains spaces. The wrapper launches this checkout's debug binary using captured session settings, runtime directory, private bus, and the explicitly named nested Wayland socket, with GTK restricted to Wayland. It refuses to launch if that socket, bus, or bridge owner is unavailable.
-3. Invoke the same command again to toggle the resident popup. Test Paste, Copy only, Read clipboard, dismissal, and terminal paste against the [manual gate](PORTING.md#manual-gono-go-gate).
+Launching with no arguments starts the resident recorder and opens the popup. Dismissing the popup does not quit the app: capture continues while it is hidden. Run the same command again to open the popup, or invoke it while the popup is visible to dismiss it. Configure app-owned global shortcuts in Settings. There is no autostart: launch the app once per session; shortcuts work only while it is resident. `--quit` releases its registrations.
 
-Running the binary directly or using `cargo run` in the original terminal still uses the host display and bus. The generated wrapper deliberately targets the nested session regardless of the invoking terminal's environment. Keep the editable target focused **inside the nested desktop**; the wrapper does not create or focus a target. Launch target applications inside the nested Shell. Shell-only devkit sessions do not provide the settings daemon needed for custom GNOME keyboard shortcuts, so use the wrapper command here. No popup is opened automatically at startup.
+Available command-line actions:
 
-The helper allows about 30 seconds for the bridge name and object to answer introspection. If readiness fails or Shell exits during startup, it prints the last probe error plus GNOME's extension info/errors, then exits unsuccessfully. This checks bridge availability only; it does not call `BeginPopup`, read the clipboard, or verify focus/placement.
+```text
+waytoclip
+waytoclip --settings
+waytoclip --quit
+waytoclip --clear-history
+waytoclip --toggle-private-mode
+waytoclip --reset-clear-timer
+```
 
-Shell output remains visible in the original terminal. The wrapper appends app stderr to the printed session-local `app.stderr.log`, mirrored to that terminal, and records the configured nested Wayland display on each invocation. If no popup appears, report the readiness/probe result, extension info/errors if shown, the launch line and following app errors, and relevant Shell errors. No clipboard payloads or clipboard method replies are collected by these diagnostics. Copy relevant diagnostics before closing the session: the log is temporary.
+With no arguments, `waytoclip` launches or toggles the popup. `--clear-history` follows the `confirm-clear` setting and is ignored while private mode is active. Scheduled interval clears use a separate path and are not gated by private mode.
 
-Close the nested Shell to end the foreground command. The helper terminates the app owning `org.waytoclip.WayToClip` on the private bus and discards the temporary data, configuration, cache, state, wrapper, and app log. The host runtime directory and display connection are retained for nesting. Restart `make nested-session` after bridge edits to stage the new files. Desktop behavior remains user-verified.
+## Popup keys
 
-For detailed placement acceptance, compare the first open with subsequent opens at different pointer positions. Optional `WAYTOCLIP_PLACEMENT_DEBUG=1 make nested-session` enables one Shell diagnostic per popup map with app IDs, title, captured pointer, desired position, and actual frame; it never logs editor or clipboard contents. Report these lines if placement regresses.
+These are the default local shortcuts; customize them in Settings → Popup shortcuts or through the `local-*` schema keys.
 
-## Optional: install the GNOME bridge in your normal session
+| Key | Action |
+| --- | --- |
+| `s` | Enter search |
+| `f` | Toggle favorite on the selected entry |
+| `d` | Delete the selected entry |
+| `p` | Toggle private mode |
+| `-` | Open the favorites view or go back |
+| `Up` / `Down` | Move the selection |
+| `Left` / `Right` or `Shift+Tab` / `Tab` | Previous / next page |
+| `Enter` | Confirm the selected entry |
+| `Esc` | Close the popup, or leave search |
+| `1`–`9`, `0` | Quick-select slots 1–10 |
+| `Alt+C` / `Alt+R` | Toggle case-sensitive / regex search |
 
-The Rust application uses ID `org.waytoclip.WayToClip` and remains resident after dismissal. This slice does not install an auto-start entry. The following workflow is for testing in your normal session instead of the isolated nested session.
+## Settings
 
-### Install the bridge yourself
+Open `waytoclip --settings`, or use the small gear in the popup. The gear cancels the popup transaction before opening Settings. Settings is an ordinary application window, independent of popup placement. In nested GNOME, append `--settings` to the printed temporary wrapper command.
+
+The theme-aware, translated GTK4 window is owned by the app and adds no libadwaita or other dependencies. It ports the original settings groups: **General**, **Popup**, **Behavior**, **Limits**, **Exclusion**, **Global shortcuts**, and **Popup shortcuts**, preserving source key names. Changes apply live; reopen Settings after changing language to refresh its labels. `clear-on-boot` is accurately labeled **Clear history when WayToClip starts**: it clears on application start, not only on OS reboot.
+
+Global shortcuts retain the original three actions: toggle popup (`toggle-popup`), private mode (`private-mode-binding`), and clear history (`clear-history`). All three shortcut lists default to empty; choose a binding such as **Alt+X** for the popup. `enable-keybindings` controls registration. Shortcut chips support multiple bindings per action, Add/remove, and Reset to defaults. Status reports registration success, conflicts, or backend unavailability. Capture first waits for the desktop backend to suspend the app's global grabs, then accepts a key; completing or cancelling capture restores the configured registrations.
+
+The application uses schema `org.waytoclip.WayToClip` at `/org/waytoclip/WayToClip/`. It is app-owned and preserves the source key names and defaults, including shortcut lists. It is not the original extension's schema; there is no settings or history migration from the original extension or the earlier POC.
+
+For a local debug build, inspect or change a key through the compiled schema directory:
+
+```sh
+gsettings --schemadir target/debug/build/waytoclip-*/out/schemas get org.waytoclip.WayToClip auto-paste
+gsettings --schemadir target/debug/build/waytoclip-*/out/schemas set org.waytoclip.WayToClip auto-paste false
+```
+
+Use `ls -d target/debug/build/waytoclip-*/out/schemas` to see the actual path, and replace the glob if it is ambiguous. For a release build, use `target/release/build/...` instead.
+
+`dconf` is not a guaranteed dependency, but on systems that provide it the same key can be changed directly:
+
+```sh
+dconf write /org/waytoclip/WayToClip/auto-paste false
+```
+
+The optional `dconf-editor` path is `/org/waytoclip/WayToClip/`.
+
+## Images
+
+Capture follows the source MIME priority: plain-text variants (`text/plain;charset=utf-8`, `UTF8_STRING`, `text/plain`, `STRING`), then GIF, PNG, JPG, JPEG, WebP, SVG, then HTML. An offer containing text and images therefore prefers text. Clipboard payloads are limited to **16 MiB** on both desktops.
+
+Image previews decode asynchronously on a worker using native GdkPixbuf loaders; available formats depend on the installed loaders. GIF previews are static. `image-preview-size` is clamped to 32–512 logical pixels, with aspect ratio preserved. Pending, unsupported, or corrupt images use a generic image icon. Selecting an image publishes its stored MIME type and full original bytes, not the preview.
+
+`should-cache-images=false` skips new image capture entirely, rather than merely disabling disk writes. Captured images are cached as checksum-named PNG/JPEG/GIF/WebP/SVG payload files alongside `registry.txt`; persisted records reload those files on restart, and missing files are skipped. Deletion and history clearing clean up removed image payloads. `cache-only-favorites` persists only favorite history records, but image payload files are still cached upon capture, matching the source behavior.
+
+## Desktop bridges and protocol change
+
+The bridge protocol changed for history monitoring and content-aware paste. **The new application does not support the old bridge protocol.** Refresh a staged nested bridge by restarting `make nested-session`, or update the bridge installed in your normal session and restart/reload GNOME Shell or KWin as appropriate. Reinstalling only the Rust binary while leaving an old bridge installed will not work.
+
+GNOME now also requires `ConfigureShortcuts(a(sas)) → ()`: an authoritative replacement list of action names and accelerator arrays. Keep the app and bridge contract synchronized. Restart `make nested-session` to stage the new `shortcuts.js` and updated bridge before testing Settings/global shortcuts. Schema keys and shortcut defaults are unchanged.
+
+Agents build and inspect the code; they do not install or modify desktop extensions or running desktop sessions. Bridge installation and acceptance are user-run.
+
+Milestone 5 also includes bridge bug fixes, payload caps, and byte-reading changes despite unchanged method signatures. Refresh the staged GNOME bridge by restarting `make nested-session` before image acceptance.
+
+GNOME source-app attribution uses focused-app context at the clipboard event, not a true clipboard-owner identity. Exclusions based on that context can misattribute copies under focus changes or races.
+
+### GNOME
 
 These commands are for the user to execute from the checkout on GNOME 50:
 
@@ -51,56 +116,74 @@ mkdir -p "$HOME/.local/share/gnome-shell/extensions/waytoclip-bridge@waytoclip"
 cp -R gnome-extension/. "$HOME/.local/share/gnome-shell/extensions/waytoclip-bridge@waytoclip/"
 ```
 
-On Wayland, **log out and back in** after installing a new extension so GNOME Shell discovers it. Then enable it:
+On Wayland, log out and back in after installing or updating the extension, then enable it:
 
 ```sh
 gnome-extensions enable waytoclip-bridge@waytoclip
 ```
 
-Agents have not installed or exercised the bridge. The user confirmation above covers nested GNOME; normal-session acceptance remains user-run. Updating bridge code also requires reloading the session to use the installed update.
+Launch the app and assign shortcuts in Settings → Global shortcuts. The bridge uses Meta accelerator grabs in `NORMAL | OVERVIEW`, never on the lock screen. It does not require the GNOME settings daemon, including in nested Shell sessions. No autostart entry is installed.
 
-### Set a shortcut
+### KDE
 
-In GNOME Settings, add a custom keyboard shortcut with this absolute command for the current checkout:
-
-```text
-/home/anders/git/WayToClip/target/debug/waytoclip
-```
-
-After `cargo build --release`, the corresponding command is `/home/anders/git/WayToClip/target/release/waytoclip`. Adjust the path if you move the checkout. Choose the shortcut yourself; none is installed by default.
-
-The original WayToClip extension can conflict if it uses the same shortcut, and its clipboard monitoring can re-record payloads copied by this app. Account for it when manually testing.
-
-### Normal-session manual run workflow
-
-1. Install the bridge yourself, log out/in, and enable it as above. Build and bind the shortcut.
-2. Focus a target editor, then invoke the shortcut. Type a payload and choose **Paste**; verify insertion into that editor.
-3. Invoke again and try **Copy only**; verify the clipboard changes without a paste. **Read clipboard** explicitly loads clipboard text into the editor.
-4. Focus a terminal before invoking and check **Terminal paste (Ctrl+Shift+V)**, including changing the toggle.
-5. Try Escape and an outside click that moves focus. Invoke repeatedly: hidden opens, while visible or reading cancels/dismisses. Check placement and focus against the [manual gate](PORTING.md#manual-gono-go-gate).
-
-Dismissal leaves the app resident. Choose **Quit**, run `cargo run -- --quit`, or execute `/home/anders/git/WayToClip/target/debug/waytoclip --quit` to shut it down.
-
-## KDE Wayland proof: user installation
-
-The same Rust GTK4 UI uses native `ext-data-control` text access and KWin fake-input on a worker connection. A nonvisual declarative KWin script handles cursor placement and target focus. There is no duplicated Qt UI, Qt runtime dependency in Rust, root helper, or `wl-paste` dependency. This is an explicit text interaction proof, not history monitoring.
-
-In an actual **Plasma/KWin 6.4+ Wayland session**, install `kpackagetool6` and `kbuildsycoca6` alongside the build prerequisites above. From this checkout, run these commands yourself:
+In a Plasma/KWin 6.4+ Wayland session, install `kpackagetool6` and `kbuildsycoca6` alongside the build prerequisites, then run these commands yourself:
 
 ```sh
 cargo build
 bash tools/install-kde.sh
 ```
 
-The optional argument selects a built executable, for example `bash tools/install-kde.sh target/release/waytoclip` after `cargo build --release`. The default is this checkout's `target/debug/waytoclip`, regardless of the invoking directory; explicit relative arguments are relative to your current directory. Paths with spaces work. Other than ASCII letters, digits, spaces, `/`, `.`, `_`, and `-`, binary-path characters are rejected with an error.
+The optional argument selects a built executable, for example `bash tools/install-kde.sh target/release/waytoclip`. The helper upgrades package `waytoclip-bridge`, writes the matching desktop entry for the canonical binary path, and refreshes KDE's service cache. Re-run it after KWin script or binary changes; if fake-input remains restricted, log out and back in. Enable **WayToClip Bridge** in **System Settings → Window Management → KWin Scripts**, apply, then launch the app and assign shortcuts in its Settings. Backend selection requires `KDE` in `XDG_CURRENT_DESKTOP` and `XDG_SESSION_TYPE=wayland`; test in a real KDE session.
 
-The helper installs or upgrades package ID `waytoclip-bridge`, writes `$XDG_DATA_HOME/applications/org.waytoclip.WayToClip.desktop` (default `~/.local/share/applications/`), optionally validates it with `desktop-file-validate`, and runs `kbuildsycoca6 --noincremental`. Its quoted `Exec` and unquoted `TryExec` reference the canonical absolute executable path. The entry declares `X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input` without a trailing semicolon, because KWin/KService parses `X-KDE-*` properties as comma-separated lists rather than XDG semicolon lists. A matching executable entry is required to expose private fake-input on Plasma 6.4+; the mechanism is verified on KWin 6.7.5/KF 6.30. Keep the binary at that path; rerun installation when switching binaries. Quit the resident app before upgrades or binary switches. The helper refreshes the service cache; if a running KWin still reports the interface as restricted, log out and back in as a fallback.
+Global shortcuts use native KGlobalAccel over session D-Bus, with stable component identity `org.waytoclip.WayToClip` and app-owned `_k_session:` action IDs registered nonpersistently. The KWin script has no visual UI. Registrations refresh when the daemon owner restarts. A forced app kill may leave runtime grabs until app relaunch or KGlobalAccel restart; use `--quit` for normal release.
 
-Enable **WayToClip Bridge** in **System Settings → Window Management → KWin Scripts**, then **Apply**. Installation does not enable/reconfigure scripts, start the app, or install autostart or global shortcuts. After enabling, run the installed binary or bind its absolute path to a custom KDE shortcut. Focus an editor before invoking that shortcut for acceptance. Backend selection uses `KDE` in `XDG_CURRENT_DESKTOP` and `XDG_SESSION_TYPE=wayland`; launch in the real KDE session, without spoofing these variables in GNOME.
+KDE paste is unsupported if the configured layouts do not provide consistent `v`, Control, and Shift keycodes. Before hiding the popup, the app briefly waits for held modifiers to clear; release them if paste is blocked. Focus restoration and injection remain non-atomic across separate connections.
 
-Apply the [manual gate](PORTING.md#manual-gono-go-gate), including first/subsequent cursor placement, Copy only, Read clipboard, paste and terminal-toggle behavior, outside click/Escape, repeated invocation, recovery after unrelated focus, target closure, and app quit/restart. Multi-monitor and mixed-scale behavior are not runtime verified. Paste is unsupported if `v`, Control, or Shift keycodes are inconsistent across configured keyboard layouts. Before hiding the popup, KDE paste briefly waits for held modifiers to clear using GTK's keyboard state; release modifier keys if paste is blocked. Focus loss or unavailable keyboard state aborts before clipboard publication, without restoring focus. The worker still cannot establish the target's live modifier state, and focus restoration/injection across connections remain non-atomic; the guard does not guarantee atomic target safety.
+KDE's data-control protocol exposes no clipboard owner. Source-app attribution therefore uses a best-effort snapshot of the focused app reported by KWin, and own-write suppression correlates the next selection echo after publication within a short deadline. Either can miss or misclassify under races or unusual focus changes; this is not an atomic ownership guarantee.
 
-For diagnostics, launch the binary from a terminal and retain stderr; that launch captures the terminal as the target. Use a custom shortcut with an editor focused for editor-paste acceptance. KWin errors may also appear in `journalctl --user -b`; where the distro supplies it, `journalctl --user -b -u plasma-kwin_wayland.service` narrows the log. If fake-input is unavailable, check the matching desktop entry, confirm the value has no trailing semicolon, and refresh the cache with `kbuildsycoca6 --noincremental`; log out and back in if KWin still rejects the interface.
+## Nested GNOME development
+
+`make nested-session` builds the debug binary, stages the latest bridge in temporary session-local data, enables it in isolated settings, and opens a nested GNOME Shell on a private D-Bus session. It requires `make`, Bash, `dbus-run-session`, `gsettings`, `gdbus`, `tail`, `glib-compile-schemas`, and GNOME Shell with `--devkit` and `--wayland`. No installation into your normal session or logout is needed.
+
+1. Open an editor or terminal inside the nested Shell and focus an editable target there.
+2. Wait for **Bridge ready**, then run the printed temporary wrapper command from a terminal or **Alt+F2** inside the nested Shell. The wrapper targets the nested Wayland socket, private bus, and isolated settings.
+3. The first launch starts the recorder and opens the popup. Dismiss it, copy text in the nested session, and launch the same command again to verify capture. Run it again while the popup is visible to dismiss it.
+
+Running the binary directly or using `cargo run` in the original terminal uses the host display and bus. Use the wrapper command, including with `--settings`. App-owned global shortcuts work through the bridge without a settings daemon; the nested session can now exercise them. The helper checks bridge readiness only; it does not verify clipboard capture, placement, paste, or shortcuts. Restart `make nested-session` after bridge edits to stage the new files. The helper terminates the app on exit and discards the temporary session data.
+
+For placement diagnostics, `WAYTOCLIP_PLACEMENT_DEBUG=1 make nested-session` enables one Shell line per popup map with app IDs, title, captured pointer, desired position, and actual frame; it does not log clipboard contents.
+
+## Manual acceptance checklist
+
+Build verification does not establish desktop behavior. Basic milestones 1–5 nested GNOME popup/history/image flow was reported working (“good it works”); broader acceptance remains user-run. Settings/global shortcuts are the next gate and have no new desktop acceptance. KDE requires a separate real KDE Wayland session.
+
+1. Restart `make nested-session` to stage the updated bridge, then run its printed wrapper with `--settings`.
+2. Under **Global shortcuts**, use **Add** for the popup action and record **Alt+X** after capture reports readiness. Close Settings and focus an editor inside the nested session.
+3. Press the hotkey to open the popup and select an entry to paste. Reopen and press the hotkey again to verify toggle dismissal.
+4. Edit/remove bindings, Reset, and disable `enable-keybindings`; observe that old grabs are released. Try a system-reserved key and check conflict status. Cancel capture and verify configured shortcuts return.
+5. Open Settings from the popup gear and verify popup cancellation completes first. Check that Settings remains an ordinary window and does not receive popup placement. Exercise live controls and reopen after a language change.
+
+- **Image round trip:** restart `make nested-session`, launch its printed wrapper, dismiss the popup, copy a screenshot inside the nested session, reopen, verify its preview, then select it and paste into an image-capable application there.
+- **Image lifecycle and policy:** favorite an image and restart the app to verify reload (including `cache-only-favorites`); delete or clear images and check payload cleanup, respecting retained entries. Verify private mode and `should-cache-images=false` suppress new image captures. Recopy the same MIME type and bytes and confirm no duplicate entry appears, including after selecting/pasting it.
+- **Image variety:** where available, try transparent, very wide, large, and non-PNG images; verify aspect-preserving previews and original-image paste. Check the generic-icon fallback for unsupported/corrupt images and rejection of payloads above 16 MiB.
+
+- **Capture while hidden:** copy text from several applications after dismissing the popup; reopen and confirm the new entries appear. Capture must continue while no popup is visible.
+- **Restart and persistence:** restart the app and confirm history and favorites reload from `$XDG_CACHE_HOME/org.waytoclip.WayToClip/registry.txt` (default `~/.cache/org.waytoclip.WayToClip/registry.txt`). Be aware that `clear-on-boot` is currently implemented as clear on every application start, not only on an OS reboot.
+- **Favorites and deletion:** toggle a favorite, reopen the app, and verify it survives trimming; delete an entry and verify it disappears. In the favorites view, verify the back row and removal of a favorite.
+- **Private mode:** verify `--toggle-private-mode` or the popup shortcut suppresses new captures and pending reads, and that leaving private mode restores the selected item. Verify `--clear-history` is ignored while private mode is active.
+- **Secrets and exclusions:** copy from a password manager with `ignore-secret-mimetypes` enabled and confirm it is not recorded; add an application's app ID or WM class to `excluded-apps` and confirm its copies are skipped. Selecting or pasting an item must not re-record the app's own write.
+- **Keyboard, search, and custom bindings:** verify number slots `1`–`0`, paging, `s` search, case-sensitive and regex toggles, and invalid-regex fallback to substring matching. Change a local shortcut in Settings and confirm the popup and footer hints use it. Verify all three app-owned global actions and multiple bindings per action.
+- **Cursor-side fit:** verify cursor mode chooses above or below using the measured popup size, receives that side's available height, constrains the popup, and only then presents it. This path has no known gap now, but desktop behavior remains unverified. Also test window-center mode on GNOME and KDE, on first and subsequent opens, near monitor edges, and with multiple monitors or mixed scales. Confirm the popup fits the workarea and scrolls instead of overflowing.
+- **Scheduler:** enable interval clearing, verify `next-history-clear` persists, confirm an overdue clear runs at start, and verify `--reset-clear-timer` reschedules.
+
+## Historical POC acceptance
+
+The earlier interaction proofs accepted a removed single-payload POC editor with **Paste**, **Copy only**, **Read clipboard**, **Quit**, and a terminal-paste toggle. Those controls no longer exist, and those acceptances do not apply to the current implementation.
+
+- **GNOME historical acceptance:** the user confirmed nested GNOME “fully works. pops up at cursor and pastes fine and all”. This covered basic cursor placement and paste for the old POC, not exhaustive first-frame, multi-monitor, edge, or mixed-scale behavior.
+- **KDE historical acceptance:** after the fake-input blocker was fixed, the user confirmed popup placement at the cursor and paste into the original target. This also covered only basic interaction for the old POC.
+
+These POC reports are separate from the limited current-app nested GNOME feedback recorded above. See [PORTING.md](PORTING.md#historical-interaction-proofs) for the preserved proof records.
 
 ## Origins and license
 

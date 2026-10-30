@@ -29,16 +29,20 @@ use wayland_protocols::ext::data_control::v1::client::{
 use wayland_protocols_plasma::fake_input::client::org_kde_kwin_fake_input::OrgKdeKwinFakeInput;
 use xkbcommon::xkb;
 
-use super::{error, io_error, stopped};
+use super::{FocusedAppHandle, OfferSnapshot, error, io_error, stopped};
 
-pub(super) const MAX_TEXT_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const MAX_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const MAX_MIME_BYTES: usize = 4096;
+const MAX_MIMES: usize = 256;
 const TIMEOUT: Duration = Duration::from_secs(10);
-const MIME_TYPES: [&str; 3] = ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"];
+const WATCH_TIMEOUT: Duration = Duration::from_secs(10);
+const TEXT_MIMES: [&str; 3] = ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"];
 type Reply<T> = oneshot::Sender<Result<T, glib::Error>>;
 
 pub(super) enum Command {
-    Read(Reply<String>),
-    Set(String, Reply<()>),
+    Watch(u64, Reply<OfferSnapshot>),
+    Read(u64, String, Reply<Vec<u8>>),
+    Write(String, Vec<u8>, Reply<()>),
     Paste(bool, Reply<()>),
     Shutdown,
 }
@@ -48,16 +52,24 @@ struct Barrier {
     deadline: Instant,
 }
 
+struct Watch {
+    after_serial: u64,
+    reply: Reply<OfferSnapshot>,
+    deadline: Instant,
+}
+
 struct Incoming {
     file: File,
     bytes: Vec<u8>,
-    reply: Reply<String>,
+    reply: Reply<Vec<u8>>,
+    serial: u64,
+    mimetype: String,
     deadline: Instant,
 }
 
 struct Outgoing {
     file: File,
-    text: Arc<String>,
+    bytes: Arc<Vec<u8>>,
     offset: usize,
     deadline: Instant,
 }
@@ -67,7 +79,14 @@ struct State {
     globals: HashMap<u32, (String, u32)>,
     offers: HashMap<ObjectId, (ExtDataControlOfferV1, Vec<String>)>,
     selection: Option<ExtDataControlOfferV1>,
+    last_selection: Option<ObjectId>,
     sources: Vec<ExtDataControlSourceV1>,
+    current: Option<OfferSnapshot>,
+    serial: u64,
+    has_pending_own_selection: bool,
+    own_selection_deadline: Option<Instant>,
+    focused: FocusedAppHandle,
+    watches: Vec<Watch>,
     incoming: Vec<Incoming>,
     outgoing: Vec<Outgoing>,
     barriers: HashMap<u64, Barrier>,
@@ -82,8 +101,13 @@ struct State {
     fake_name: u32,
 }
 
-pub(super) fn run(commands: mpsc::Receiver<Command>, mut wakeup: UnixStream, ready: Reply<()>) {
-    let result = initialize(&commands, &mut wakeup);
+pub(super) fn run(
+    commands: mpsc::Receiver<Command>,
+    mut wakeup: UnixStream,
+    ready: Reply<()>,
+    focused: FocusedAppHandle,
+) {
+    let result = initialize(&commands, &mut wakeup, focused);
     let (connection, mut queue, mut state, manager, device, fake) = match result {
         Ok(worker) => worker,
         Err(cause) => {
@@ -100,12 +124,17 @@ pub(super) fn run(commands: mpsc::Receiver<Command>, mut wakeup: UnixStream, rea
             while let Ok(command) = commands.try_recv() {
                 match command {
                     Command::Shutdown => return Ok(()),
-                    Command::Read(reply) => {
+                    Command::Watch(after_serial, reply) => {
                         if !reply.is_canceled() {
-                            start_read(&mut state, reply);
+                            start_watch(&mut state, after_serial, reply);
                         }
                     }
-                    Command::Set(text, reply) => {
+                    Command::Read(serial, mimetype, reply) => {
+                        if !reply.is_canceled() {
+                            start_read(&mut state, serial, mimetype, reply);
+                        }
+                    }
+                    Command::Write(mimetype, bytes, reply) => {
                         if reply.is_canceled() {
                             continue;
                         }
@@ -116,12 +145,15 @@ pub(super) fn run(commands: mpsc::Receiver<Command>, mut wakeup: UnixStream, rea
                             )));
                             continue;
                         }
-                        let source = manager.create_data_source(&queue.handle(), Arc::new(text));
-                        for mime in MIME_TYPES {
-                            source.offer(mime.to_owned());
+                        let source = manager.create_data_source(&queue.handle(), Arc::new(bytes));
+                        for mime in offered_mimetypes(&mimetype) {
+                            source.offer(mime);
                         }
                         device.set_selection(Some(&source));
                         state.sources.push(source);
+                        state.has_pending_own_selection = true;
+                        state.own_selection_deadline =
+                            Some(Instant::now() + Duration::from_secs(2));
                         barrier(&connection, &queue.handle(), &mut state, reply);
                     }
                     Command::Paste(is_terminal, reply) => {
@@ -173,6 +205,11 @@ pub(super) fn run(commands: mpsc::Receiver<Command>, mut wakeup: UnixStream, rea
             .reply
             .send(Err(error(gio::IOErrorEnum::Closed, &message)));
     }
+    for pending in state.watches.drain(..) {
+        let _ = pending
+            .reply
+            .send(Err(error(gio::IOErrorEnum::Closed, &message)));
+    }
     if fake.version() >= 5 {
         fake.destroy();
     }
@@ -191,10 +228,12 @@ type Initialized = (
 fn initialize(
     commands: &mpsc::Receiver<Command>,
     wakeup: &mut UnixStream,
+    focused: FocusedAppHandle,
 ) -> Result<Initialized, glib::Error> {
     let connection = connect_socket(wakeup)?;
     let mut queue = connection.new_event_queue::<State>();
     let mut state = State::default();
+    state.focused = focused;
     let handle = queue.handle();
     let registry = connection.display().get_registry(&handle, ());
     synchronize(&connection, &mut queue, &mut state, wakeup, commands)?;
@@ -438,52 +477,211 @@ fn nonblocking(fd: &impl AsRawFd) -> io::Result<()> {
     Ok(())
 }
 
-fn start_read(state: &mut State, reply: Reply<String>) {
-    let prepare = || -> Result<File, glib::Error> {
-        if state.incoming.len() >= 4 {
-            return Err(error(
-                gio::IOErrorEnum::Busy,
-                "Too many pending clipboard reads",
-            ));
+fn is_plain_text_mime(mimetype: &str) -> bool {
+    mimetype == "text/plain"
+        || mimetype.starts_with("text/plain;")
+        || mimetype == "STRING"
+        || mimetype == "UTF8_STRING"
+}
+
+fn offered_mimetypes(mimetype: &str) -> Vec<String> {
+    let mut mimes = vec![mimetype.to_owned()];
+    if is_plain_text_mime(mimetype) {
+        for mime in TEXT_MIMES {
+            if !mimes.iter().any(|existing| existing == mime) {
+                mimes.push(mime.to_owned());
+            }
         }
-        let offer = state
-            .selection
-            .as_ref()
-            .ok_or_else(|| error(gio::IOErrorEnum::NotFound, "Clipboard has no selection"))?;
-        let (_, formats) = state
-            .offers
-            .get(&offer.id())
-            .ok_or_else(|| io_error("Clipboard selection metadata is unavailable"))?;
-        let mime = MIME_TYPES
-            .iter()
-            .find(|mime| formats.iter().any(|format| format == **mime))
-            .ok_or_else(|| {
-                error(
-                    gio::IOErrorEnum::NotSupported,
-                    "Clipboard selection does not offer UTF-8 text",
-                )
-            })?;
-        let mut descriptors = [-1; 2];
-        if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
-            return Err(io_error(io::Error::last_os_error()));
+    }
+    mimes
+}
+
+fn start_watch(state: &mut State, after_serial: u64, reply: Reply<OfferSnapshot>) {
+    if state.watches.len() >= 8 {
+        let _ = reply.send(Err(error(
+            gio::IOErrorEnum::Busy,
+            "Too many pending clipboard watches",
+        )));
+        return;
+    }
+    refresh_current_mimetypes(state);
+    if let Some(current) = state.current.as_ref() {
+        if current.serial != after_serial
+            && (!current.mimetypes.is_empty() || state.selection.is_none())
+        {
+            let _ = reply.send(Ok(current.clone()));
+            return;
         }
-        let reader = unsafe { File::from_raw_fd(descriptors[0]) };
-        let writer = unsafe { OwnedFd::from_raw_fd(descriptors[1]) };
-        nonblocking(&reader).map_err(io_error)?;
-        offer.receive((*mime).to_owned(), std::os::fd::AsFd::as_fd(&writer));
-        Ok(reader)
+    }
+    state.watches.push(Watch {
+        after_serial,
+        reply,
+        deadline: Instant::now() + WATCH_TIMEOUT,
+    });
+}
+
+fn capture_current(state: &mut State, is_own: bool) {
+    let Some(offer) = state.selection.as_ref() else {
+        return;
     };
-    match prepare() {
-        Ok(file) => state.incoming.push(Incoming {
+    let mimetypes = state
+        .offers
+        .get(&offer.id())
+        .map(|(_, formats)| formats.clone())
+        .unwrap_or_default();
+    // Data-control exposes no clipboard owner; attribute the selection to the focused app snapshot.
+    let focused = state
+        .focused
+        .lock()
+        .map(|focused| focused.clone())
+        .unwrap_or_default();
+    state.current = Some(OfferSnapshot {
+        serial: state.serial,
+        mimetypes,
+        app_id: focused.app_id,
+        wm_class: focused.wm_class,
+        is_own,
+    });
+}
+
+fn refresh_current_mimetypes(state: &mut State) {
+    let Some(current) = state.current.as_mut() else {
+        return;
+    };
+    if !current.mimetypes.is_empty() {
+        return;
+    }
+    let Some(offer) = state.selection.as_ref() else {
+        return;
+    };
+    if let Some((_, formats)) = state.offers.get(&offer.id()) {
+        current.mimetypes = formats.clone();
+    }
+}
+
+fn missing_snapshot(serial: u64) -> OfferSnapshot {
+    OfferSnapshot {
+        serial,
+        mimetypes: Vec::new(),
+        app_id: String::new(),
+        wm_class: String::new(),
+        is_own: false,
+    }
+}
+
+fn service_watches(state: &mut State, now: Instant) {
+    if state
+        .own_selection_deadline
+        .is_some_and(|deadline| now >= deadline)
+    {
+        state.has_pending_own_selection = false;
+        state.own_selection_deadline = None;
+    }
+    refresh_current_mimetypes(state);
+    let mut index = 0;
+    while index < state.watches.len() {
+        let watch = &state.watches[index];
+        if watch.reply.is_canceled() {
+            state.watches.swap_remove(index);
+            continue;
+        }
+        let has_fresh = state.current.as_ref().is_some_and(|current| {
+            current.serial != watch.after_serial
+                && (!current.mimetypes.is_empty() || state.selection.is_none())
+        });
+        if has_fresh {
+            let current = state.current.as_ref().unwrap().clone();
+            let watch = state.watches.swap_remove(index);
+            let _ = watch.reply.send(Ok(current));
+            continue;
+        }
+        if now >= watch.deadline {
+            let result = if state.selection.is_some() {
+                state
+                    .current
+                    .clone()
+                    .unwrap_or_else(|| missing_snapshot(state.serial))
+            } else {
+                missing_snapshot(state.serial)
+            };
+            let watch = state.watches.swap_remove(index);
+            let _ = watch.reply.send(Ok(result));
+            continue;
+        }
+        index += 1;
+    }
+}
+
+fn prepare_read(state: &State, serial: u64, mimetype: &str) -> Result<(File, String), glib::Error> {
+    if state.incoming.len() >= 4 {
+        return Err(error(
+            gio::IOErrorEnum::Busy,
+            "Too many pending clipboard reads",
+        ));
+    }
+    if serial == 0 || serial != state.serial {
+        return Err(error(
+            gio::IOErrorEnum::Failed,
+            "Clipboard selection changed before read",
+        ));
+    }
+    let offer = state
+        .selection
+        .as_ref()
+        .ok_or_else(|| error(gio::IOErrorEnum::NotFound, "Clipboard has no selection"))?;
+    let (_, formats) = state
+        .offers
+        .get(&offer.id())
+        .ok_or_else(|| io_error("Clipboard selection metadata is unavailable"))?;
+    let offered = formats
+        .iter()
+        .find(|format| format.eq_ignore_ascii_case(mimetype))
+        .cloned()
+        .ok_or_else(|| {
+            error(
+                gio::IOErrorEnum::NotSupported,
+                "Clipboard selection does not offer the requested MIME type",
+            )
+        })?;
+    let mut descriptors = [-1; 2];
+    if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
+        return Err(io_error(io::Error::last_os_error()));
+    }
+    let reader = unsafe { File::from_raw_fd(descriptors[0]) };
+    let writer = unsafe { OwnedFd::from_raw_fd(descriptors[1]) };
+    nonblocking(&reader).map_err(io_error)?;
+    offer.receive(offered.clone(), std::os::fd::AsFd::as_fd(&writer));
+    Ok((reader, offered))
+}
+
+fn start_read(state: &mut State, serial: u64, mimetype: String, reply: Reply<Vec<u8>>) {
+    match prepare_read(state, serial, &mimetype) {
+        Ok((file, offered)) => state.incoming.push(Incoming {
             file,
             bytes: Vec::new(),
             reply,
+            serial,
+            mimetype: offered,
             deadline: Instant::now() + TIMEOUT,
         }),
         Err(cause) => {
             let _ = reply.send(Err(cause));
         }
     }
+}
+
+fn is_read_current(state: &State, serial: u64, mimetype: &str) -> bool {
+    if state.serial != serial {
+        return false;
+    }
+    let Some(offer) = state.selection.as_ref() else {
+        return false;
+    };
+    state.offers.get(&offer.id()).is_some_and(|(_, formats)| {
+        formats
+            .iter()
+            .any(|format| format.eq_ignore_ascii_case(mimetype))
+    })
 }
 
 fn service_transfers(state: &mut State) {
@@ -503,21 +701,14 @@ fn service_transfers(state: &mut State) {
             )))
         } else {
             match transfer.file.read(&mut buffer) {
-                Ok(0) => Some(
-                    String::from_utf8(std::mem::take(&mut transfer.bytes)).map_err(|_| {
-                        error(
-                            gio::IOErrorEnum::InvalidData,
-                            "Clipboard text is not valid UTF-8",
-                        )
-                    }),
-                ),
-                Ok(count) if transfer.bytes.len() + count <= MAX_TEXT_BYTES => {
+                Ok(0) => Some(Ok(std::mem::take(&mut transfer.bytes))),
+                Ok(count) if transfer.bytes.len() + count <= MAX_BYTES => {
                     transfer.bytes.extend_from_slice(&buffer[..count]);
                     None
                 }
                 Ok(_) => Some(Err(error(
                     gio::IOErrorEnum::NoSpace,
-                    "Clipboard text exceeds 16 MiB",
+                    "Clipboard payload exceeds 16 MiB",
                 ))),
                 Err(cause)
                     if matches!(
@@ -532,6 +723,16 @@ fn service_transfers(state: &mut State) {
         };
         if let Some(result) = result {
             let transfer = state.incoming.swap_remove(index);
+            let result = match result {
+                Ok(bytes) if is_read_current(state, transfer.serial, &transfer.mimetype) => {
+                    Ok(bytes)
+                }
+                Ok(_) => Err(error(
+                    gio::IOErrorEnum::Failed,
+                    "Clipboard selection changed during read",
+                )),
+                Err(cause) => Err(cause),
+            };
             let _ = transfer.reply.send(result);
         } else {
             index += 1;
@@ -541,15 +742,12 @@ fn service_transfers(state: &mut State) {
         if now >= transfer.deadline {
             return false;
         }
-        let end = (transfer.offset + 65536).min(transfer.text.len());
-        match transfer
-            .file
-            .write(&transfer.text.as_bytes()[transfer.offset..end])
-        {
+        let end = (transfer.offset + 65536).min(transfer.bytes.len());
+        match transfer.file.write(&transfer.bytes[transfer.offset..end]) {
             Ok(0) => false,
             Ok(count) => {
                 transfer.offset += count;
-                transfer.offset < transfer.text.len()
+                transfer.offset < transfer.bytes.len()
             }
             Err(cause) => matches!(
                 cause.kind(),
@@ -557,6 +755,7 @@ fn service_transfers(state: &mut State) {
             ),
         }
     });
+    service_watches(state, now);
     let expired: Vec<_> = state
         .barriers
         .iter()
@@ -631,8 +830,30 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for State {
                 state.offers.insert(id.id(), (id, Vec::new()));
             }
             ext_data_control_device_v1::Event::Selection { id } => {
+                let selected = id.as_ref().map(Proxy::id);
+                let is_same = state.last_selection.as_ref() == selected.as_ref();
+                // Offers carry no owner; treat the next selection echo after our publication as own.
+                let is_own = state.has_pending_own_selection
+                    && state
+                        .own_selection_deadline
+                        .is_none_or(|deadline| Instant::now() <= deadline);
+                let had_selection = state.selection.is_some();
+                state.has_pending_own_selection = false;
+                state.own_selection_deadline = None;
                 state.selection = id;
-                let selected = state.selection.as_ref().map(Proxy::id);
+                if selected.is_some() {
+                    if !is_same || is_own || state.current.is_none() {
+                        state.serial = state.serial.saturating_add(1);
+                        state.last_selection = selected.clone();
+                        capture_current(state, is_own);
+                    }
+                } else {
+                    state.last_selection = None;
+                    if had_selection {
+                        state.serial = state.serial.saturating_add(1);
+                        state.current = Some(missing_snapshot(state.serial));
+                    }
+                }
                 state.offers.retain(|id, (offer, _)| {
                     if Some(id) == selected.as_ref() {
                         true
@@ -668,7 +889,7 @@ impl Dispatch<ExtDataControlOfferV1, ()> for State {
     ) {
         if let ext_data_control_offer_v1::Event::Offer { mime_type } = event {
             if let Some((_, formats)) = state.offers.get_mut(&offer.id()) {
-                if formats.len() < 256 && mime_type.len() < 4096 {
+                if formats.len() < MAX_MIMES && mime_type.len() <= MAX_MIME_BYTES {
                     formats.push(mime_type);
                 }
             }
@@ -676,12 +897,12 @@ impl Dispatch<ExtDataControlOfferV1, ()> for State {
     }
 }
 
-impl Dispatch<ExtDataControlSourceV1, Arc<String>> for State {
+impl Dispatch<ExtDataControlSourceV1, Arc<Vec<u8>>> for State {
     fn event(
         state: &mut Self,
         source: &ExtDataControlSourceV1,
         event: ext_data_control_source_v1::Event,
-        text: &Arc<String>,
+        bytes: &Arc<Vec<u8>>,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
@@ -689,13 +910,12 @@ impl Dispatch<ExtDataControlSourceV1, Arc<String>> for State {
             ext_data_control_source_v1::Event::Send { mime_type, fd } => {
                 let file = File::from(fd);
                 if state.outgoing.len() < 16
-                    && MIME_TYPES.contains(&mime_type.as_str())
+                    && mime_type.len() <= MAX_MIME_BYTES
                     && nonblocking(&file).is_ok()
-                    && !text.is_empty()
                 {
                     state.outgoing.push(Outgoing {
                         file,
-                        text: Arc::clone(text),
+                        bytes: Arc::clone(bytes),
                         offset: 0,
                         deadline: Instant::now() + TIMEOUT,
                     });

@@ -1,7 +1,7 @@
 {
     "uuid": "waytoclip-bridge@waytoclip",
     "name": "WayToClip GNOME Bridge",
-    "description": "GNOME Shell integration for the WayToClip GTK application. Reads clipboard text on explicit request, writes clipboard text, positions the popup, and pastes into the selected application.",
+    "description": "GNOME Shell integration for the WayToClip GTK application. Monitors clipboard changes, transfers text and image content, positions the popup, registers resident application shortcuts, and pastes into the selected application.",
     "shell-version": ["50"],
     "url": "https://github.com/AndersKlint/way-to-clip"
 }

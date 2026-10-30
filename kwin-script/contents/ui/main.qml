@@ -7,6 +7,10 @@ Item {
 
     readonly property string instance: Date.now().toString(36) + "-" + Math.random().toString(36).slice(2)
     readonly property string applicationId: "org.waytoclip.WayToClip"
+    readonly property int margin: 10
+    readonly property int gapBelow: 20
+    readonly property int gapAbove: 10
+
     property bool isStopping: false
     property var commandCall: null
     property var outgoingCalls: []
@@ -20,6 +24,21 @@ Item {
     property bool isInvalidated: false
     property bool hasActivatedPopup: false
     property var restoreCommand: null
+
+    property int positionMode: 0
+    property var placementArea: null
+    property real anchorRelX: 0
+    property real anchorRelY: 0
+    property real belowTopY: 0
+    property real aboveBottomY: 0
+    property real centerX: 0
+    property real centerY: 0
+    property bool isCentered: false
+    property bool isDirectionSettled: false
+    property string placementDirection: "below"
+    property bool hasPlacement: false
+    property bool hasLockedX: false
+    property real lockedXRel: 0
 
     Component {
         id: dbusCallComponent
@@ -58,7 +77,10 @@ Item {
     Timer {
         id: placementCorrection
         interval: 0
-        onTriggered: bridge.placePopup()
+        onTriggered: {
+            if (bridge.popupWindow && !bridge.popupWindow.hidden)
+                bridge.placePopup()
+        }
     }
 
     Connections {
@@ -76,6 +98,8 @@ Item {
                 bridge.invalidate("Original target window was removed")
         }
         function onWindowActivated(window) {
+            if (window && window !== bridge.popupWindow)
+                bridge.reportActiveApp(window)
             if (bridge.sessionToken === null)
                 return
             if (window && window !== bridge.targetWindow && window !== bridge.popupWindow) {
@@ -103,8 +127,10 @@ Item {
             bridge.placePopup()
         }
         function onHiddenChanged() {
-            if (bridge.popupWindow && !bridge.popupWindow.hidden)
+            if (bridge.popupWindow && !bridge.popupWindow.hidden) {
                 bridge.placePopup()
+                placementCorrection.restart()
+            }
             bridge.checkRestore()
         }
     }
@@ -166,13 +192,39 @@ Item {
             record.error = error
         if (extra) {
             record.app_id = extra.app_id
+            record.wm_class = extra.wm_class
             record.is_terminal = extra.is_terminal
+            record.has_target = extra.has_target
+            record.available_width = extra.available_width
+            record.available_height = extra.available_height
         }
         send("ReportResult", record)
     }
 
     function isUint32(value) {
         return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 4294967295
+    }
+
+    function isPositiveSize(value) {
+        return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 2147483647
+    }
+
+    function normalizeId(value) {
+        return String(value || "").trim().toLowerCase().replace(/\.desktop$/, "")
+    }
+
+    function reportActiveApp(window) {
+        if (!window || window.deleted || window === popupWindow)
+            return
+        var appId = normalizeId(window.desktopFileName || window.resourceClass || "")
+        var wmClass = normalizeId(window.resourceClass || "")
+        if (appId === "" && wmClass === "")
+            return
+        send("ReportEvent", {
+            event: "active_app",
+            app_id: appId,
+            wm_class: wmClass
+        })
     }
 
     function execute(command) {
@@ -189,7 +241,9 @@ Item {
                 result(command, false, "Stale popup token")
                 return
             }
-            if (command.operation === "restore") {
+            if (command.operation === "settle") {
+                settle(command)
+            } else if (command.operation === "restore") {
                 restore(command)
             } else if (command.operation === "cancel") {
                 cancel(command)
@@ -206,9 +260,71 @@ Item {
         }
     }
 
+    function eligibleTarget(pid) {
+        var target = KWin.Workspace.activeWindow
+        if (!target || target.deleted || !target.wantsInput)
+            return null
+        var ownApplicationId = normalizeId(applicationId)
+        var isOwnApplication = target.pid === pid
+            || normalizeId(target.resourceClass) === ownApplicationId
+            || normalizeId(target.desktopFileName) === ownApplicationId
+        if (isOwnApplication)
+            return null
+        return target
+    }
+
+    function capturePlacement(target, mode) {
+        var cursor = KWin.Workspace.cursorPos
+        if (!cursor)
+            return false
+        var hasTarget = target !== null && target !== undefined
+        var output = null
+        if (mode === 1 && hasTarget) {
+            var frame = target.frameGeometry
+            if (frame && Number.isFinite(frame.x) && Number.isFinite(frame.y)
+                    && Number.isFinite(frame.width) && Number.isFinite(frame.height))
+                output = KWin.Workspace.screenAt(Qt.point(frame.x + frame.width / 2, frame.y + frame.height / 2))
+        }
+        if (!output)
+            output = KWin.Workspace.screenAt(cursor)
+        if (!output)
+            return false
+        var area = KWin.Workspace.clientArea(KWin.Workspace.PlacementArea, output, sessionDesktop)
+        if (!area || area.width <= 0 || area.height <= 0)
+            return false
+        var anchorX = cursor.x
+        var anchorY = cursor.y
+        if (mode === 1 && hasTarget) {
+            var geometry = target.frameGeometry
+            if (geometry && Number.isFinite(geometry.x) && Number.isFinite(geometry.y)
+                    && Number.isFinite(geometry.width) && Number.isFinite(geometry.height)) {
+                anchorX = geometry.x + geometry.width / 2
+                anchorY = geometry.y + geometry.height / 2
+            }
+        }
+        placementArea = area
+        anchorRelX = anchorX - area.x
+        anchorRelY = anchorY - area.y
+        belowTopY = anchorRelY + gapBelow
+        aboveBottomY = anchorRelY - gapAbove
+        centerX = anchorRelX
+        centerY = anchorRelY
+        isCentered = mode === 1 && hasTarget
+        isDirectionSettled = isCentered
+        placementDirection = "below"
+        hasPlacement = true
+        hasLockedX = false
+        lockedXRel = anchorRelX
+        return true
+    }
+
     function begin(command) {
         if (!isUint32(command.pid) || command.pid === 0) {
             result(command, false, "Missing popup process ID")
+            return
+        }
+        if (!isUint32(command.popup_position_mode) || command.popup_position_mode > 1) {
+            result(command, false, "Invalid popup position mode")
             return
         }
         if (sessionToken !== null) {
@@ -219,21 +335,22 @@ Item {
             result(command, false, "Required KWin 6.4 workspace APIs are unavailable")
             return
         }
-        var target = KWin.Workspace.activeWindow
-        if (!target || target.deleted || target.pid === command.pid || !target.wantsInput) {
-            result(command, false, "No eligible original target window")
-            return
-        }
+        var target = eligibleTarget(command.pid)
         sessionToken = command.token
         popupPid = command.pid
         targetWindow = target
+        positionMode = command.popup_position_mode
         cursorPosition = Qt.point(KWin.Workspace.cursorPos.x, KWin.Workspace.cursorPos.y)
         sessionDesktop = KWin.Workspace.currentDesktop
         sessionActivity = KWin.Workspace.currentActivity
         isInvalidated = false
-        var appId = target.desktopFileName || target.resourceClass
-        var terminalId = String(appId).toLowerCase().replace(/\.desktop$/, "")
-        var isTerminal = ["org.kde.konsole", "konsole", "org.gnome.terminal", "org.gnome.ptyxis", "org.wezfurlong.wezterm", "alacritty", "kitty", "foot", "com.mitchellh.ghostty"].indexOf(terminalId) !== -1
+        if (!capturePlacement(target, positionMode)) {
+            result(command, false, "KWin popup placement work area is unavailable")
+            clearSession()
+            return
+        }
+        if (target)
+            reportActiveApp(target)
         var windows = KWin.Workspace.windows
         for (var index = 0; index < windows.length; ++index)
             considerPopup(windows[index])
@@ -241,7 +358,57 @@ Item {
             result(command, false, "Popup session was invalidated during begin")
             return
         }
-        result(command, true, "", {app_id: String(appId), is_terminal: isTerminal})
+        var availableWidth = Math.max(0, Math.round(placementArea.width) - 2 * margin)
+        var availableHeight = Math.max(0, Math.round(isCentered
+            ? placementArea.height - 2 * margin
+            : Math.max(spaceAbove(placementArea), spaceBelow(placementArea))))
+        result(command, true, "", {
+            app_id: target ? normalizeId(target.desktopFileName || target.resourceClass || "") : "",
+            wm_class: target ? normalizeId(target.resourceClass || "") : "",
+            is_terminal: false,
+            has_target: target !== null,
+            available_width: availableWidth,
+            available_height: availableHeight
+        })
+    }
+
+    function settle(command) {
+        if (!hasPlacement || !placementArea) {
+            result(command, false, "Popup placement is unavailable")
+            return
+        }
+        if (!isPositiveSize(command.width) || !isPositiveSize(command.height)) {
+            result(command, false, "Invalid popup size")
+            return
+        }
+        var width = command.width
+        var height = command.height
+        var availableHeight
+        if (isCentered) {
+            availableHeight = placementArea.height - 2 * margin
+        } else {
+            var below = spaceBelow(placementArea)
+            var above = spaceAbove(placementArea)
+            if (height <= below) {
+                placementDirection = "below"
+                availableHeight = below
+            } else if (height <= above) {
+                placementDirection = "above"
+                availableHeight = above
+            } else if (above > below) {
+                placementDirection = "above"
+                availableHeight = above
+            } else {
+                placementDirection = "below"
+                availableHeight = below
+            }
+            isDirectionSettled = true
+            lockedXRel = clamp(anchorRelX, margin, placementArea.width - width - margin)
+            hasLockedX = true
+        }
+        result(command, true, "", {
+            available_height: Math.max(0, Math.round(availableHeight))
+        })
     }
 
     function matchesPopup(window) {
@@ -256,7 +423,7 @@ Item {
             hasActivatedPopup = false
         }
         placePopup()
-        if (sessionToken !== null)
+        if (sessionToken !== null && !window.hidden)
             placementCorrection.restart()
     }
 
@@ -273,26 +440,80 @@ Item {
         }
     }
 
+    function clamp(value, minimum, maximum) {
+        if (maximum < minimum)
+            return minimum
+        return Math.max(minimum, Math.min(value, maximum))
+    }
+
+    function spaceBelow(area) {
+        return area.height - anchorRelY - gapBelow - margin
+    }
+
+    function spaceAbove(area) {
+        return anchorRelY - gapAbove - margin
+    }
+
+    function decidePopupSide(height, area) {
+        var below = spaceBelow(area)
+        var above = spaceAbove(area)
+        if (height <= below)
+            return "below"
+        if (height <= above)
+            return "above"
+        return above > below ? "above" : "below"
+    }
+
+    function provisionalPosition(width, height, area) {
+        if (isCentered)
+            return [
+                clamp(centerX - width / 2, margin, area.width - width - margin),
+                clamp(centerY - height / 2, margin, area.height - height - margin)
+            ]
+        var direction = decidePopupSide(height, area)
+        var x = clamp(anchorRelX, margin, area.width - width - margin)
+        var y = direction === "above" ? aboveBottomY - height : belowTopY
+        return [x, clamp(y, margin, area.height - height - margin)]
+    }
+
     function placePopupFrame() {
-        if (sessionToken === null || isInvalidated || !popupWindow || restoreCommand)
+        if (sessionToken === null || isInvalidated || !popupWindow || restoreCommand || !hasPlacement)
             return
-        var output = KWin.Workspace.screenAt(cursorPosition)
-        if (!output) {
-            invalidate("Cursor output is no longer available")
-            return
-        }
-        var area = KWin.Workspace.clientArea(KWin.Workspace.PlacementArea, output, sessionDesktop)
-        if (!area || area.width <= 0 || area.height <= 0) {
-            invalidate("KWin placement work area is unavailable")
+        var area = placementArea
+        if (!area) {
+            invalidate("KWin placement work area is no longer available")
             return
         }
         var geometry = popupWindow.frameGeometry
-        if (!geometry || !Number.isFinite(geometry.width) || !Number.isFinite(geometry.height)) {
+        if (!geometry || !Number.isFinite(geometry.width) || !Number.isFinite(geometry.height) || geometry.width <= 0 || geometry.height <= 0) {
             invalidate("KWin popup frame geometry is unavailable")
             return
         }
-        var x = Math.max(area.x, Math.min(cursorPosition.x, area.x + area.width - geometry.width))
-        var y = Math.max(area.y, Math.min(cursorPosition.y, area.y + area.height - geometry.height))
+        var width = geometry.width
+        var height = geometry.height
+        var x
+        var y
+        if (!isCentered && !isDirectionSettled) {
+            var provisional = provisionalPosition(width, height, area)
+            x = provisional[0]
+            y = provisional[1]
+        } else if (isCentered) {
+            x = clamp(centerX - width / 2, margin, area.width - width - margin)
+            y = clamp(centerY - height / 2, margin, area.height - height - margin)
+        } else {
+            if (!hasLockedX) {
+                lockedXRel = clamp(anchorRelX, margin, area.width - width - margin)
+                hasLockedX = true
+            }
+            x = clamp(lockedXRel, margin, area.width - width - margin)
+            if (placementDirection === "above")
+                y = aboveBottomY - height
+            else
+                y = belowTopY
+            y = clamp(y, margin, area.height - height - margin)
+        }
+        x = area.x + Math.round(x)
+        y = area.y + Math.round(y)
         if (geometry.x !== x || geometry.y !== y)
             popupWindow.frameGeometry = Qt.rect(x, y, geometry.width, geometry.height)
         if (sessionToken === null || !popupWindow)
@@ -311,7 +532,11 @@ Item {
 
     function canRestore() {
         var active = KWin.Workspace.activeWindow
-        return !isInvalidated && targetWindow && !targetWindow.deleted && (!active || active === targetWindow || active === popupWindow) && KWin.Workspace.currentDesktop === sessionDesktop && KWin.Workspace.currentActivity === sessionActivity
+        if (isInvalidated || KWin.Workspace.currentDesktop !== sessionDesktop || KWin.Workspace.currentActivity !== sessionActivity)
+            return false
+        if (!targetWindow)
+            return true
+        return !targetWindow.deleted && (!active || active === targetWindow || active === popupWindow)
     }
 
     function restore(command) {
@@ -338,6 +563,10 @@ Item {
         }
         if (popupWindow && !popupWindow.hidden)
             return
+        if (!targetWindow) {
+            finishRestore(true)
+            return
+        }
         if (KWin.Workspace.activeWindow !== targetWindow)
             KWin.Workspace.activeWindow = targetWindow
         if (KWin.Workspace.activeWindow === targetWindow)
@@ -394,9 +623,26 @@ Item {
         sessionActivity = ""
         hasActivatedPopup = false
         isInvalidated = false
+        positionMode = 0
+        placementArea = null
+        anchorRelX = 0
+        anchorRelY = 0
+        belowTopY = 0
+        aboveBottomY = 0
+        centerX = 0
+        centerY = 0
+        isCentered = false
+        isDirectionSettled = false
+        placementDirection = "below"
+        hasPlacement = false
+        hasLockedX = false
+        lockedXRel = 0
     }
 
-    Component.onCompleted: nextCommand()
+    Component.onCompleted: {
+        reportActiveApp(KWin.Workspace.activeWindow)
+        nextCommand()
+    }
     Component.onDestruction: {
         isStopping = true
         reconnectTimer.stop()

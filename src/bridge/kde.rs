@@ -1,3 +1,4 @@
+mod shortcuts;
 mod transport;
 
 use std::{
@@ -8,31 +9,57 @@ use std::{
 
 use gtk::{gdk, gio, glib, prelude::*};
 
-use super::{PopupTarget, error};
-use crate::clipboard::kde::KdeWayland;
+use super::{ClipboardOffer, PopupTarget, error};
+use crate::clipboard::kde::{KdeWayland, focused_app_handle};
 use transport::Transport;
 
 pub struct Bridge {
     transport: Transport,
     native: KdeWayland,
+    shortcuts: shortcuts::Shortcuts,
 }
 
 impl Bridge {
     pub async fn connect(connection: gio::DBusConnection) -> Result<Self, glib::Error> {
-        let transport = Transport::new(connection)?;
-        let native = KdeWayland::connect().await?;
-        Ok(Self { transport, native })
+        let focused = focused_app_handle();
+        let shortcuts = shortcuts::Shortcuts::new(connection.clone());
+        let transport = Transport::new(connection, focused.clone())?;
+        let native = KdeWayland::connect(focused).await?;
+        Ok(Self {
+            transport,
+            native,
+            shortcuts,
+        })
     }
 
-    pub async fn begin(&self) -> Result<PopupTarget, glib::Error> {
-        self.transport.begin().await
+    pub async fn configure_shortcuts(
+        &self,
+        bindings: &[(String, Vec<String>)],
+    ) -> Result<(), glib::Error> {
+        self.shortcuts.configure(bindings).await
+    }
+
+    pub async fn begin(&self, popup_position_mode: i32) -> Result<PopupTarget, glib::Error> {
+        if !matches!(popup_position_mode, 0 | 1) {
+            return Err(error("Unsupported KDE popup position mode"));
+        }
+        self.transport.begin(popup_position_mode).await
     }
 
     pub async fn prepare_finish(
         &self,
         window: &gtk::ApplicationWindow,
         token: u32,
+        should_paste: bool,
     ) -> Result<(), glib::Error> {
+        if !should_paste {
+            return Ok(());
+        }
+        if !self.transport.has_target(token)? {
+            return Err(error(
+                "KDE paste preparation failed: no eligible target window",
+            ));
+        }
         let deadline = Instant::now() + Duration::from_millis(1500);
         let has_lost_focus = Rc::new(Cell::new(!window.is_active()));
         let focus_state = Rc::clone(&has_lost_focus);
@@ -74,22 +101,54 @@ impl Bridge {
         }
     }
 
+    pub async fn settle_popup(
+        &self,
+        token: u32,
+        width: i32,
+        height: i32,
+    ) -> Result<i32, glib::Error> {
+        if width <= 0 || height <= 0 {
+            return Err(error("KDE popup settle requires positive width and height"));
+        }
+        let reply = self
+            .transport
+            .command(
+                "settle",
+                token,
+                serde_json::json!({"width": width, "height": height}),
+            )
+            .await?;
+        let available_height =
+            transport::required_i32(&reply["available_height"], "available_height")?;
+        if available_height < 0 {
+            return Err(error("KWin settle result has an invalid available height"));
+        }
+        Ok(available_height)
+    }
+
     pub async fn finish(
         &self,
         token: u32,
-        text: &str,
+        mimetype: &str,
+        bytes: &[u8],
         should_paste: bool,
         is_terminal: bool,
     ) -> Result<(), glib::Error> {
+        if should_paste && !self.transport.has_target(token)? {
+            return Err(error("KDE paste failed: no eligible target window"));
+        }
         let result = async {
             self.transport.validate(token)?;
-            self.native.set_text(text).await?;
+            self.native.write(mimetype, bytes.to_vec()).await?;
             self.transport.validate(token)?;
             self.transport
                 .command("restore", token, serde_json::json!({}))
                 .await?;
             self.transport.validate(token)?;
             if should_paste {
+                if !self.transport.has_target(token)? {
+                    return Err(error("KDE paste failed: target window was lost"));
+                }
                 self.native.paste(is_terminal).await?;
                 self.transport.validate(token)?;
             }
@@ -126,7 +185,31 @@ impl Bridge {
         result.map(|_| ())
     }
 
-    pub async fn read_clipboard(&self) -> Result<String, glib::Error> {
-        self.native.read_text().await
+    pub async fn watch_clipboard(&self, after_serial: u64) -> Result<ClipboardOffer, glib::Error> {
+        loop {
+            let offer = self.native.watch(after_serial).await?;
+            if offer.serial == after_serial {
+                continue;
+            }
+            return Ok(ClipboardOffer {
+                serial: offer.serial,
+                mimetypes: offer.mimetypes,
+                app_id: offer.app_id,
+                wm_class: offer.wm_class,
+                is_own: offer.is_own,
+            });
+        }
+    }
+
+    pub async fn read_clipboard_content(
+        &self,
+        serial: u64,
+        mimetype: &str,
+    ) -> Result<Vec<u8>, glib::Error> {
+        self.native.read(serial, mimetype).await
+    }
+
+    pub async fn write_clipboard(&self, mimetype: &str, bytes: &[u8]) -> Result<(), glib::Error> {
+        self.native.write(mimetype, bytes.to_vec()).await
     }
 }

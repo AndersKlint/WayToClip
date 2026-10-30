@@ -1,11 +1,36 @@
 mod worker;
 
-use std::{io::Write, os::unix::net::UnixStream, sync::mpsc};
+use std::{
+    io::Write,
+    os::unix::net::UnixStream,
+    sync::{Arc, Mutex, mpsc},
+};
 
 use futures_channel::oneshot;
 use gtk::{gio, glib};
 
 use worker::Command;
+
+#[derive(Clone, Default)]
+pub struct FocusedApp {
+    pub app_id: String,
+    pub wm_class: String,
+}
+
+pub type FocusedAppHandle = Arc<Mutex<FocusedApp>>;
+
+pub fn focused_app_handle() -> FocusedAppHandle {
+    Arc::new(Mutex::new(FocusedApp::default()))
+}
+
+#[derive(Clone)]
+pub struct OfferSnapshot {
+    pub serial: u64,
+    pub mimetypes: Vec<String>,
+    pub app_id: String,
+    pub wm_class: String,
+    pub is_own: bool,
+}
 
 pub struct KdeWayland {
     commands: mpsc::SyncSender<Command>,
@@ -13,36 +38,56 @@ pub struct KdeWayland {
 }
 
 impl KdeWayland {
-    pub async fn connect() -> Result<Self, glib::Error> {
+    pub async fn connect(focused: FocusedAppHandle) -> Result<Self, glib::Error> {
         let (wakeup, receiver) = UnixStream::pair().map_err(io_error)?;
         wakeup.set_nonblocking(true).map_err(io_error)?;
         receiver.set_nonblocking(true).map_err(io_error)?;
-        let (commands, incoming) = mpsc::sync_channel(8);
+        let (commands, incoming) = mpsc::sync_channel(16);
         let backend = Self { commands, wakeup };
         let (ready, result) = oneshot::channel();
         std::thread::Builder::new()
             .name("waytoclip-wayland".into())
-            .spawn(move || worker::run(incoming, receiver, ready))
+            .spawn(move || worker::run(incoming, receiver, ready, focused))
             .map_err(io_error)?;
         result.await.map_err(|_| stopped())??;
         Ok(backend)
     }
 
-    pub async fn read_text(&self) -> Result<String, glib::Error> {
+    pub async fn watch(&self, after_serial: u64) -> Result<OfferSnapshot, glib::Error> {
         let (reply, result) = oneshot::channel();
-        self.send(Command::Read(reply))?;
+        self.send(Command::Watch(after_serial, reply))?;
         result.await.map_err(|_| stopped())?
     }
 
-    pub async fn set_text(&self, text: &str) -> Result<(), glib::Error> {
-        if text.len() > worker::MAX_TEXT_BYTES {
+    pub async fn read(&self, serial: u64, mimetype: &str) -> Result<Vec<u8>, glib::Error> {
+        if mimetype.is_empty() || mimetype.len() > worker::MAX_MIME_BYTES || mimetype.contains('\0')
+        {
             return Err(error(
-                gio::IOErrorEnum::NoSpace,
-                "Clipboard text exceeds 16 MiB",
+                gio::IOErrorEnum::InvalidData,
+                "Invalid clipboard MIME type",
             ));
         }
         let (reply, result) = oneshot::channel();
-        self.send(Command::Set(text.to_owned(), reply))?;
+        self.send(Command::Read(serial, mimetype.to_owned(), reply))?;
+        result.await.map_err(|_| stopped())?
+    }
+
+    pub async fn write(&self, mimetype: &str, bytes: Vec<u8>) -> Result<(), glib::Error> {
+        if mimetype.is_empty() || mimetype.len() > worker::MAX_MIME_BYTES || mimetype.contains('\0')
+        {
+            return Err(error(
+                gio::IOErrorEnum::InvalidData,
+                "Invalid clipboard MIME type",
+            ));
+        }
+        if bytes.len() > worker::MAX_BYTES {
+            return Err(error(
+                gio::IOErrorEnum::NoSpace,
+                "Clipboard payload exceeds 16 MiB",
+            ));
+        }
+        let (reply, result) = oneshot::channel();
+        self.send(Command::Write(mimetype.to_owned(), bytes, reply))?;
         result.await.map_err(|_| stopped())?
     }
 
