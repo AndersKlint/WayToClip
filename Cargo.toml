@@ -1,0 +1,8 @@
+[package]
+name = "waytoclip"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gio = { version = "0.22", features = ["v2_80"] }
+gtk = { package = "gtk4", version = "0.11", features = ["v4_20"] }
