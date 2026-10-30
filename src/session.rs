@@ -120,7 +120,7 @@ impl Session {
             let cached_bridge = session.bridge.borrow().clone();
             let bridge = match cached_bridge {
                 Some(bridge) => bridge,
-                None => match Bridge::connect().await {
+                None => match Bridge::connect(&session.application.upgrade().unwrap()).await {
                     Ok(bridge) => {
                         let bridge = Rc::new(bridge);
                         session.bridge.replace(Some(Rc::clone(&bridge)));
@@ -128,7 +128,7 @@ impl Session {
                     }
                     Err(error) => {
                         session.report_error(&format!(
-                            "Cannot connect to the session bus. Popup was not opened: {error}"
+                            "Cannot initialize the desktop backend. Popup was not opened: {error}"
                         ));
                         session.complete();
                         return;
@@ -148,7 +148,10 @@ impl Session {
                     session.popup.editor.grab_focus();
                 }
                 Err(error) => {
-                    session.report_error(&format!("BeginPopup failed. Ensure the WayToClip GNOME bridge is enabled and available. Popup was not opened: {error}"));
+                    session.report_error(&format!(
+                        "BeginPopup failed. {} Popup was not opened: {error}",
+                        bridge.setup_hint()
+                    ));
                     session.complete();
                 }
             }
@@ -163,10 +166,29 @@ impl Session {
         let text = self.popup.text();
         let is_terminal = self.popup.terminal.is_active();
         self.phase.set(Phase::Finishing);
-        self.popup.window.set_visible(false);
         let bridge = self.bridge.borrow().as_ref().unwrap().clone();
+        if matches!(bridge.as_ref(), Bridge::Kde(_)) && should_paste {
+            self.popup.set_busy(true);
+            self.popup
+                .set_status("Waiting for modifier keys to be released…");
+        } else {
+            self.popup.window.set_visible(false);
+        }
         let session = Rc::clone(self);
         let boundary_task = glib::spawn_future_local(async move {
+            if let Err(error) = bridge
+                .prepare_finish(&session.popup.window, token, should_paste)
+                .await
+            {
+                session.popup.window.set_visible(false);
+                session.report_error(&format!("Paste preparation failed. Clipboard was not changed and paste was not requested: {error}"));
+                if let Err(error) = bridge.cancel(token, false).await {
+                    session.report_error(&format!("CancelPopup after paste preparation failure could not be confirmed: {error}"));
+                }
+                session.complete();
+                return;
+            }
+            session.popup.window.set_visible(false);
             if let Err(error) = bridge.finish(token, &text, should_paste, is_terminal).await {
                 session.report_error(&format!("FinishPopup failed. Clipboard and paste outcome are unknown. The popup will remain hidden: {error}"));
             }

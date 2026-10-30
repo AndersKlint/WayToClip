@@ -1,0 +1,12 @@
+{
+    "KPlugin": {
+        "Id": "waytoclip-bridge",
+        "Name": "WayToClip Bridge",
+        "Description": "Window placement and focus for the WayToClip GTK popup",
+        "Version": "0.1.0",
+        "EnabledByDefault": false
+    },
+    "X-Plasma-API": "declarativescript",
+    "X-Plasma-MainScript": "ui/main.qml",
+    "KPackageStructure": "KWin/Script"
+}

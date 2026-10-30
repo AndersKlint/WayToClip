@@ -1,5 +1,8 @@
 mod application;
 mod bridge;
+mod clipboard {
+    pub mod kde;
+}
 mod popup;
 mod session;
 

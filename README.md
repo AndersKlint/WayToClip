@@ -2,7 +2,7 @@
 
 A Rust port of the keyboard-driven WayToClip clipboard manager for Wayland. The goal is to preserve the original application's behavior with a full GTK4 popup and a thin desktop-specific bridge.
 
-The first feasibility slice targets **GNOME Shell 50** (local environment: 50.6). KDE Wayland is next, after the GNOME interaction gate. Broader version support is undecided.
+The interaction proofs target **GNOME Shell 50** (local environment: 50.6) and **Plasma/KWin 6.4+ on Wayland**. GNOME has user-confirmed basic interaction; KDE has not been runtime tested. Broader version support is undecided.
 
 ## Current milestone
 
@@ -10,11 +10,11 @@ The first slice implements one editable text payload with **Paste**, **Copy only
 
 This is an interaction proof, not the complete clipboard manager. Build verification does not establish desktop compatibility: user-run acceptance is required. See [PORTING.md](PORTING.md) for the gate and subsequent milestones.
 
-The user confirms the popup opens in nested GNOME and says “other operations worked”, but placement was at the top-left instead of the cursor. The placement correction awaits manual acceptance; the detailed gate is still open.
+The user confirms nested GNOME “fully works. pops up at cursor and pastes fine and all”. This confirms basic placement and paste interaction, without establishing exhaustive first-frame, multi-monitor, edge, or mixed-scale acceptance.
 
 ## Quick development: nested GNOME session
 
-Requires a Rust toolchain supporting edition 2024, **GTK4 >= 4.20** and **GLib/GIO >= 2.80** development packages, and `pkg-config`. Cargo uses `gtk4` 0.11 with `v4_20` and `gio` 0.22 with `v2_80`. Run from this checkout:
+Requires a Rust toolchain supporting edition 2024, **GTK4 >= 4.20**, **GLib/GIO >= 2.80**, **libxkbcommon development packages**, and `pkg-config`. Cargo uses `gtk4` 0.11 with `v4_20`, `gio` 0.22 with `v2_80`, and `xkbcommon` 0.9 (the crate version, not a system-library minimum). Typical libxkbcommon package names are `libxkbcommon-dev` or `libxkbcommon-devel`. These GTK/GLib requirements limit which distro releases can build the app, independently of their Plasma version. Run from this checkout:
 
 ```sh
 make nested-session
@@ -34,7 +34,7 @@ Shell output remains visible in the original terminal. The wrapper appends app s
 
 Close the nested Shell to end the foreground command. The helper terminates the app owning `org.waytoclip.WayToClip` on the private bus and discards the temporary data, configuration, cache, state, wrapper, and app log. The host runtime directory and display connection are retained for nesting. Restart `make nested-session` after bridge edits to stage the new files. Desktop behavior remains user-verified.
 
-For the placement retry, move the pointer well inside the nested screen before launching, and compare the first open with subsequent opens at different pointer positions. Optional `WAYTOCLIP_PLACEMENT_DEBUG=1 make nested-session` enables one Shell diagnostic per popup map with app IDs, title, captured pointer, desired position, and actual frame; it never logs editor or clipboard contents. Report these lines if placement still fails.
+For detailed placement acceptance, compare the first open with subsequent opens at different pointer positions. Optional `WAYTOCLIP_PLACEMENT_DEBUG=1 make nested-session` enables one Shell diagnostic per popup map with app IDs, title, captured pointer, desired position, and actual frame; it never logs editor or clipboard contents. Report these lines if placement regresses.
 
 ## Optional: install the GNOME bridge in your normal session
 
@@ -55,7 +55,7 @@ On Wayland, **log out and back in** after installing a new extension so GNOME Sh
 gnome-extensions enable waytoclip-bridge@waytoclip
 ```
 
-Installation and runtime interaction have not been performed by the agents. First-frame placement and focus behavior remain unverified on the desktop. Updating bridge code also requires reloading the session to use the installed update.
+Agents have not installed or exercised the bridge. The user confirmation above covers nested GNOME; normal-session acceptance remains user-run. Updating bridge code also requires reloading the session to use the installed update.
 
 ### Set a shortcut
 
@@ -78,6 +78,27 @@ The original WayToClip extension can conflict if it uses the same shortcut, and 
 5. Try Escape and an outside click that moves focus. Invoke repeatedly: hidden opens, while visible or reading cancels/dismisses. Check placement and focus against the [manual gate](PORTING.md#manual-gono-go-gate).
 
 Dismissal leaves the app resident. Choose **Quit**, run `cargo run -- --quit`, or execute `/home/anders/git/WayToClip/target/debug/waytoclip --quit` to shut it down.
+
+## KDE Wayland proof: user installation
+
+The same Rust GTK4 UI uses native `ext-data-control` text access and KWin fake-input on a worker connection. A nonvisual declarative KWin script handles cursor placement and target focus. There is no duplicated Qt UI, Qt runtime dependency in Rust, root helper, or `wl-paste` dependency. This is an explicit text interaction proof, not history monitoring.
+
+In an actual **Plasma/KWin 6.4+ Wayland session**, install `kpackagetool6` and `kbuildsycoca6` alongside the build prerequisites above. From this checkout, run these commands yourself:
+
+```sh
+cargo build
+bash tools/install-kde.sh
+```
+
+The optional argument selects a built executable, for example `bash tools/install-kde.sh target/release/waytoclip` after `cargo build --release`. The default is this checkout's `target/debug/waytoclip`, regardless of the invoking directory; explicit relative arguments are relative to your current directory. Paths with spaces work. Other than ASCII letters, digits, spaces, `/`, `.`, `_`, and `-`, binary-path characters are rejected with an error.
+
+The helper installs or upgrades package ID `waytoclip-bridge`, writes `$XDG_DATA_HOME/applications/org.waytoclip.WayToClip.desktop` (default `~/.local/share/applications/`), optionally validates it with `desktop-file-validate`, and runs `kbuildsycoca6`. Its quoted `Exec` and unquoted `TryExec` reference the canonical absolute executable path. The entry declares `X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input;`: a matching executable entry is required to expose private fake-input on KWin 6.4–6.6. Keep the binary at that path; rerun installation when switching binaries. Quit the resident app before upgrades or binary switches.
+
+Enable **WayToClip Bridge** in **System Settings → Window Management → KWin Scripts**, then **Apply**. Installation does not enable/reconfigure scripts, start the app, or install autostart or global shortcuts. After enabling, run the installed binary or bind its absolute path to a custom KDE shortcut. Focus an editor before invoking that shortcut for acceptance. Backend selection uses `KDE` in `XDG_CURRENT_DESKTOP` and `XDG_SESSION_TYPE=wayland`; launch in the real KDE session, without spoofing these variables in GNOME.
+
+Apply the [manual gate](PORTING.md#manual-gono-go-gate), including first/subsequent cursor placement, Copy only, Read clipboard, paste and terminal-toggle behavior, outside click/Escape, repeated invocation, recovery after unrelated focus, target closure, and app quit/restart. Multi-monitor and mixed-scale behavior are not runtime verified. Paste is unsupported if `v`, Control, or Shift keycodes are inconsistent across configured keyboard layouts. Before hiding the popup, KDE paste briefly waits for held modifiers to clear using GTK's keyboard state; release modifier keys if paste is blocked. Focus loss or unavailable keyboard state aborts before clipboard publication, without restoring focus. The worker still cannot establish the target's live modifier state, and focus restoration/injection across connections remain non-atomic; the guard does not guarantee atomic target safety.
+
+For diagnostics, launch the binary from a terminal and retain stderr; that launch captures the terminal as the target. Use a custom shortcut with an editor focused for editor-paste acceptance. KWin errors may also appear in `journalctl --user -b`; where the distro supplies it, `journalctl --user -b -u plasma-kwin_wayland.service` narrows the log. If fake-input is unavailable, check the matching desktop entry, cache refresh, and installed binary path. No KDE runtime acceptance has been performed yet.
 
 ## Origins and license
 
