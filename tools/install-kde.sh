@@ -17,9 +17,15 @@ binary=$(realpath -e -- "${1:-$script_directory/../target/debug/waytoclip}") || 
 [[ -f $binary && -x $binary ]] || fail "Binary is not an executable file: $binary"
 
 # A restricted alphabet avoids the distinct Exec and TryExec escaping grammars.
+lc_all_was_set=${LC_ALL+x}
+lc_all_value=${LC_ALL-}
 LC_ALL=C
-export LC_ALL
 [[ $binary != *[!a-zA-Z0-9_./\ -]* ]] || fail 'Binary path may contain only ASCII letters, digits, spaces, /, ., _, and -; use a build path without other characters.'
+if [[ $lc_all_was_set ]]; then
+    export LC_ALL=$lc_all_value
+else
+    unset LC_ALL
+fi
 
 data_directory=${XDG_DATA_HOME:-${HOME:?HOME is unset}/.local/share}
 [[ $data_directory = /* ]] || fail 'XDG_DATA_HOME must be an absolute path.'
@@ -33,6 +39,9 @@ else
 fi
 
 mkdir -p -- "$desktop_directory"
+desktop_tmp=$(mktemp -- "$desktop_directory/.org.waytoclip.WayToClip.XXXXXX.desktop")
+trap 'rm -f -- "$desktop_tmp"' EXIT
+# KService parses X-KDE-* properties as comma-separated lists, unlike XDG semicolon lists.
 printf '%s\n' \
     '[Desktop Entry]' \
     'Type=Application' \
@@ -42,9 +51,12 @@ printf '%s\n' \
     "TryExec=$binary" \
     'Terminal=false' \
     'Categories=Utility;' \
-    'X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input;' > "$desktop_file"
+    'X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input' > "$desktop_tmp"
 if command -v desktop-file-validate >/dev/null; then
-    desktop-file-validate "$desktop_file"
+    desktop-file-validate "$desktop_tmp"
 fi
-kbuildsycoca6
-printf 'Installed %s\nEnable WayToClip Bridge in System Settings → Window Management → KWin Scripts, then Apply.\nLaunch %s after enabling it.\n' "$desktop_file" "$binary"
+chmod 0644 -- "$desktop_tmp"
+mv -- "$desktop_tmp" "$desktop_file"
+trap - EXIT
+kbuildsycoca6 --noincremental
+printf 'Installed %s\nEnable WayToClip Bridge in System Settings → Window Management → KWin Scripts, then Apply.\nLaunch %s after enabling it.\nIf fake-input is still unavailable, log out and back in to restart KWin.\n' "$desktop_file" "$binary"

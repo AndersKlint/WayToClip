@@ -222,7 +222,7 @@ fn initialize(
         )
     })?;
     let (seat_name, seat_version) = find("wl_seat", 1)?;
-    let (fake_name, fake_version) = find("org_kde_kwin_fake_input", 4).map_err(|_| error(gio::IOErrorEnum::PermissionDenied, "KWin fake-input v4+ is unavailable or restricted. A matching Exec desktop entry must declare X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input;"))?;
+    let (fake_name, fake_version) = find("org_kde_kwin_fake_input", 4).map_err(|_| error(gio::IOErrorEnum::PermissionDenied, "KWin fake-input v4+ is unavailable or restricted. A matching Exec desktop entry must declare X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input (comma-separated, no trailing semicolon), then refresh with kbuildsycoca6 --noincremental or log out and back in."))?;
     state.device_name = manager_name;
     state.seat_name = seat_name;
     state.fake_name = fake_name;

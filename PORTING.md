@@ -16,7 +16,7 @@ Shared identity:
 
 The bridge XML in the implementation is authoritative for method signatures. GNOME operations are `BeginPopup` (session token, target app ID, terminal hint), `FinishPopup` (token, text, paste choice, terminal choice), `CancelPopup` (token, focus-restoration choice), and explicit `ReadClipboard`. KDE's `NextCommand`, `ReportResult`, and `ReportEvent` carry token-scoped placement/focus commands and results; only the current `org.kde.KWin` owner may call the endpoint. Clipboard text stays in the native worker, not the KWin command transport. Keep the app and bridge contracts synchronized.
 
-## 1. GNOME GTK interaction proof — basic interaction confirmed
+## 1. GNOME GTK interaction proof — complete, basic interaction accepted
 
 Baseline: GNOME Shell 50, locally installed 50.6. One in-memory editable text payload, Paste and Copy only actions, terminal-paste toggle, explicit Read clipboard, and Escape/focus-loss dismissal. Launch toggles the resident app: hidden opens; visible or reading cancels/dismisses, matching the original extension. Quit or `waytoclip --quit` shuts it down. No history capture, persistence, images, or private mode in this slice.
 
@@ -26,7 +26,7 @@ The user confirms nested GNOME “fully works. pops up at cursor and pastes fine
 
 ### Manual go/no-go gate
 
-Proceed only after the user verifies:
+Basic interaction is user-accepted for both proofs. Retain these detailed checks for further acceptance and regression coverage:
 
 - The first visible frame is placed at the cursor without an intermediate misplaced frame or flicker.
 - Placement works across monitors, monitor edges, and differing display scales.
@@ -39,17 +39,17 @@ Proceed only after the user verifies:
 
 Record failures and resolve feasibility blockers before expanding the feature set. A successful build alone does not pass this gate.
 
-## 2. KDE Wayland interaction proof — current, runtime acceptance pending
+## 2. KDE Wayland interaction proof — complete, basic interaction accepted
 
 Target Plasma/KWin 6.4+ Wayland with the same Rust GTK4 UI. The implemented native worker uses `ext_data_control_manager_v1` for explicit UTF-8 text read/publication and `org_kde_kwin_fake_input` v4+ for paste; blocking transfers stay off the UI thread. The declarative nonvisual KWin script captures the original target and cursor, places/activates the popup, restores focus, and reports invalidation. Rust owns cancellation and worker shutdown. No root helper, `wl-paste`, Qt UI duplication, or Qt runtime dependency in Rust is required. This slice does not implement history monitoring.
 
-The backend selects KDE from `XDG_CURRENT_DESKTOP` with `XDG_SESSION_TYPE=wayland`. Test in a real KDE session, not a GNOME session with spoofed environment variables. KWin 6.4–6.6 requires a desktop entry matching the actual executable to declare `X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input;`. The user-run `tools/install-kde.sh` installs/upgrades the package, writes that entry with the canonical binary path, and refreshes the executable match cache using `kbuildsycoca6`. The user enables the script in System Settings and supplies their own shortcut; installation does not start the app or enable scripts automatically. See [README.md](README.md#kde-wayland-proof-user-installation).
+The backend selects KDE from `XDG_CURRENT_DESKTOP` with `XDG_SESSION_TYPE=wayland`. Test in a real KDE session, not a GNOME session with spoofed environment variables. Plasma/KWin 6.4+ requires a desktop entry matching the actual executable to declare `X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input` without a trailing semicolon, because KService parses `X-KDE-*` properties as comma-separated lists. The user-run `tools/install-kde.sh` installs/upgrades the package, writes that entry with the canonical binary path, and refreshes the executable match cache using `kbuildsycoca6 --noincremental`. The user enables the script in System Settings and supplies their own shortcut; installation does not start the app or enable scripts automatically. See [README.md](README.md#kde-wayland-proof-user-installation).
 
 The `xkbcommon` 0.9 crate adds a libxkbcommon development-package requirement. GTK >= 4.20 and GLib/GIO >= 2.80 remain build constraints even on distros providing KWin 6.4+. Paste rejects keymaps without consistent `v`, Control, and Shift keycodes across all configured layouts. Before hiding the popup, Rust performs a bounded wait while focused for Control, Shift, Alt, Super, Meta, and Hyper to clear in the GTK main connection's keyboard modifier state; locks are ignored. Latched focus loss or missing keyboard state aborts before clipboard publication and cancels without focus restoration. The worker still cannot establish the target's live modifier state. Focus restoration and injection across separate connections retain a non-atomic race; no atomic target-safety guarantee is established.
 
-KDE has not been runtime tested. Apply the same manual interaction gate before declaring this proof accepted, including first/subsequent placement and recovery after unrelated focus, target closure, and app restart. Monitor/scale coverage remains user-run. A build is not desktop acceptance.
+After the fake-input blocker was fixed, the user confirmed popup placement at the cursor and paste into the original target worked, accepting the KDE proof. This establishes basic interaction, not exhaustive coverage. Retain the manual gate for first/subsequent placement, monitor edges, multiple monitors, differing scales, and recovery after unrelated focus, target closure, and app restart. A build is not desktop acceptance.
 
-## 3. Behavioral port
+## 3. Behavioral port — current
 
 Port pure history and clipboard logic first, preserving the source's filtering and ordering behavior. Then port persistence/settings, GTK popup and preferences feature parity, and finally lifecycle/distribution work. Consult source behavior as each domain is ported; the original README's feature list is context, not an approved exhaustive scope or acceptance specification.
 
